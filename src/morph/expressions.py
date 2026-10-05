@@ -127,7 +127,7 @@ def when_to_cel(when: Any) -> str:
 class Expression:
     """A compiled CEL expression: its source, the context paths it reads, and an evaluator."""
 
-    __slots__ = ("source", "paths", "_program")
+    __slots__ = ("source", "paths", "literals", "comparisons", "_program")
 
     def __init__(self, source: str):
         try:
@@ -137,6 +137,10 @@ class Expression:
 
         self.source = source
         self.paths: frozenset[str] = frozenset(_collect_paths(ast))
+        self.literals: tuple[Any, ...] = tuple(_collect_literals(ast))
+        self.comparisons: dict[str, tuple[Any, ...]] = {
+            path: tuple(values) for path, values in _collect_comparisons(ast).items()
+        }
         self._program = _ENV.program(ast)
 
     def value(self, context: dict[str, Any]) -> Any:
@@ -253,4 +257,92 @@ def _collect(node: Any, bound: frozenset[str], out: set[str]) -> None:
 def _collect_paths(ast: Tree) -> set[str]:
     out: set[str] = set()
     _collect(ast, frozenset(), out)
+    return out
+
+
+def _parse_string_literal(text: str) -> str:
+    body = text
+    if body[:1] in ("r", "R"):
+        body = body[1:]
+        quote = body[:3] if body[:3] in ('"""', "'''") else body[:1]
+        return body[len(quote):-len(quote)]
+    quote = body[:3] if body[:3] in ('"""', "'''") else body[:1]
+    inner = body[len(quote):-len(quote)]
+    try:
+        return json.loads('"' + inner.replace('"', '\\"') + '"') if quote.startswith("'") else json.loads('"' + inner + '"')
+    except ValueError:
+        return inner
+
+
+_NO_LITERAL = object()
+
+
+def _literal_value(node: Tree) -> Any:
+    """Parse a `literal` node, or return _NO_LITERAL."""
+    if node.data != "literal" or not node.children:
+        return _NO_LITERAL
+    token = node.children[0]
+    if not isinstance(token, Token):
+        return _NO_LITERAL
+    text = str(token)
+    try:
+        if token.type in ("INT_LIT", "UINT_LIT"):
+            return int(text.rstrip("uU"), 0)
+        if token.type == "FLOAT_LIT":
+            return float(text)
+        if token.type == "STRING_LIT":
+            return _parse_string_literal(text)
+        if token.type == "BOOL_LIT":
+            return text == "true"
+    except ValueError:
+        return _NO_LITERAL
+    return _NO_LITERAL
+
+
+def _collect_literals(ast: Tree) -> list[Any]:
+    """Return the literal values an expression mentions, in source order."""
+    out: list[Any] = []
+    for node in ast.iter_subtrees_topdown():
+        value = _literal_value(node)
+        if value is not _NO_LITERAL:
+            out.append(value)
+    return out
+
+
+def _single_literal(node: Any) -> Any:
+    """Descend single-child wrappers to a lone literal, else _NO_LITERAL."""
+    while isinstance(node, Tree):
+        if node.data == "literal":
+            return _literal_value(node)
+        if node.data == "unary" and len(node.children) == 2 and isinstance(node.children[0], Token) and str(node.children[0]) == "-":
+            inner = _single_literal(node.children[1])
+            return -inner if isinstance(inner, (int, float)) and not isinstance(inner, bool) else _NO_LITERAL
+        if len(node.children) != 1:
+            return _NO_LITERAL
+        node = node.children[0]
+    return _NO_LITERAL
+
+
+def _collect_comparisons(ast: Tree) -> dict[str, list[Any]]:
+    """Map each context path to the literals it is compared with (==, <, in, methods...)."""
+    out: dict[str, list[Any]] = {}
+
+    def add(path: str | None, value: Any) -> None:
+        if path is None or value is _NO_LITERAL:
+            return
+        bucket = out.setdefault(path, [])
+        if value not in bucket:
+            bucket.append(value)
+
+    for node in ast.iter_subtrees_topdown():
+        if node.data == "relation" and len(node.children) == 2:
+            operator, right = node.children
+            if isinstance(operator, Tree) and operator.data.startswith("relation_") and operator.children:
+                left = operator.children[0]
+                add(_dotted(left), _single_literal(right))
+                add(_dotted(right), _single_literal(left))
+        elif node.data == "member_dot_arg" and len(node.children) > 2:
+            receiver, args = node.children[0], node.children[2]
+            if isinstance(args, Tree) and len(args.children) == 1:
+                add(_dotted(receiver), _single_literal(args.children[0]))
     return out

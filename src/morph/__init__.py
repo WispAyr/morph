@@ -1,3 +1,4 @@
+from .analysis import Finding, Report, analyze
 from .compiler import Compiler, NodeTarget, PythonTarget, SQLTarget
 from .effects import (
     ActionSpec,
@@ -58,5 +59,8 @@ __all__ = [
     "Event",
     "EventStore",
     "MORPHSystem",
+    "Finding",
+    "Report",
+    "analyze",
     "load_system_definition",
 ]

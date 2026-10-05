@@ -7,6 +7,7 @@ from typing import Any, Sequence
 
 import yaml
 
+from .analysis import analyze
 from .compiler import Compiler
 from .effects import EffectExecutor, load_adapters
 from .ir import MORPHIR
@@ -60,6 +61,13 @@ def _build_parser() -> argparse.ArgumentParser:
 
     validate_parser = subparsers.add_parser("validate", help="Check a MORPH YAML definition without evaluating it.")
     validate_parser.add_argument("source", help="Path to the YAML file to validate.")
+
+    check_parser = subparsers.add_parser("check", help="Validate a definition and run semantic checks (shadowing, reachability, wiring).")
+    check_parser.add_argument("source", help="Path to the YAML file to check.")
+    check_parser.add_argument("--samples", type=int, default=500, help="Contexts to sample for reachability (0 disables).")
+    check_parser.add_argument("--seed", type=int, default=0)
+    check_parser.add_argument("--strict", action="store_true", help="Exit non-zero on warnings as well as errors.")
+    check_parser.add_argument("--json", action="store_true", help="Emit the report as JSON.")
 
     compile_parser = subparsers.add_parser("compile", help="Compile a MORPH YAML definition to a target backend.")
     compile_parser.add_argument("source", help="Path to the YAML file to compile.")
@@ -208,6 +216,33 @@ def _cmd_validate(source: str) -> int:
     return 0
 
 
+def _cmd_check(source: str, samples: int, seed: int, strict: bool, as_json: bool) -> int:
+    try:
+        definition = load_system_definition(Path(source))
+        report = analyze(definition, samples=samples, seed=seed)
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        if as_json:
+            print(json.dumps({"errors": 1, "warnings": 0, "findings": [{"severity": "error", "code": "invalid-definition", "message": str(exc), "location": ""}]}))
+        else:
+            print(f"error: {exc}")
+        return 1
+
+    if as_json:
+        print(json.dumps(report.to_dict(), indent=2))
+    else:
+        for finding in report.findings:
+            print(finding)
+        summary = f"{len(report.errors)} errors, {len(report.warnings)} warnings, {len(report.findings) - len(report.errors) - len(report.warnings)} notes"
+        if report.samples:
+            unreached = [name for name, counts in report.coverage.items() if counts["fired"] == 0]
+            summary += f"; {len(report.coverage) - len(unreached)}/{len(report.coverage)} policies reached in {report.samples} samples"
+        print(summary)
+
+    if report.errors or (strict and report.warnings):
+        return 1
+    return 0
+
+
 def _cmd_compile(source: str, target: str, pretty: bool) -> int:
     try:
         definition = load_system_definition(Path(source))
@@ -300,6 +335,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "validate":
         return _cmd_validate(args.source)
+
+    if args.command == "check":
+        return _cmd_check(args.source, args.samples, args.seed, args.strict, args.json)
 
     if args.command == "compile":
         return _cmd_compile(args.source, args.target, args.pretty)

@@ -6,7 +6,7 @@ entities:
   - name: source
     fields: {id: string, status: string, latency_ms: int}
   - name: destination
-    fields: {id: string, status: string, latency_ms: int, source: string}
+    fields: {id: string, status: string, latency_ms: int}
     states: [idle, routed, faulted]
     initial: idle
     transitions:

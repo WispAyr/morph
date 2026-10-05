@@ -26,6 +26,7 @@ python -m pip install -e .[dev]
 pytest -q
 morph init demo.yaml
 morph validate demo.yaml
+morph check demo.yaml
 morph run demo.yaml --set route.status=ready
 morph run demo.yaml --set route.status=ready --set route.locked=true --explain
 morph compile demo.yaml --target node
@@ -133,6 +134,15 @@ morph system crosspoint.yaml --store events.jsonl observe source cam1 status=liv
 morph system crosspoint.yaml --store events.jsonl act --adapters morph.examples.crosspoint:adapters source=cam1 destination=wall operator=ewan
 morph system crosspoint.yaml --store events.jsonl state destination wall
 morph system crosspoint.yaml --store events.jsonl history --kind transitioned
+```
+
+## Semantic checks
+
+`morph check` runs what the loader cannot: it finds policies that can never decide because an earlier one always wins, deny rules pre-empted by a broader allow, catch-alls that are not last, unreachable or terminal states, shadowed transitions, transitions on unknown actions, capabilities and actions nothing uses, and fields nothing reads. Policy reachability is sampled from the entity schema and the literals the policies mention, with a fixed seed, so the report is deterministic and `--samples` trades time for confidence. `--strict` fails on warnings, `--json` emits the report for tooling.
+
+```bash
+morph check crosspoint.yaml
+morph check crosspoint.yaml --samples 2000 --strict --json
 ```
 
 ## Evaluation semantics
