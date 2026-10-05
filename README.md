@@ -28,4 +28,10 @@ morph init demo.yaml
 morph compile demo.yaml --target node
 ```
 
-The CLI gives MORPH a real developer workflow: initialize a YAML definition, load it, and compile it into Python, Node, or SQL execution targets.
+The CLI gives MORPH a real developer workflow: initialize a YAML definition, scaffold a reusable project, load it, and compile it into Python, Node, or SQL execution targets.
+
+```bash
+morph new my_service --template service
+cd my_service
+morph compile morph.yaml --target node
+```

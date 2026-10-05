@@ -2,6 +2,7 @@ from .compiler import Compiler, NodeTarget, PythonTarget, SQLTarget
 from .ir import ExecutionGraph, MORPHIR
 from .loader import load_system_definition
 from .planner import ExecutionPlanner
+from .project import ProjectScaffold, ProjectTemplate
 from .runtime import MORPHRuntime
 from .state import StateMachine
 from .validators import CapabilityValidator, PolicyValidator
@@ -20,5 +21,7 @@ __all__ = [
     "PythonTarget",
     "NodeTarget",
     "SQLTarget",
+    "ProjectTemplate",
+    "ProjectScaffold",
     "load_system_definition",
 ]

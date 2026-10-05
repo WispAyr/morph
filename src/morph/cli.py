@@ -7,6 +7,7 @@ from typing import Sequence
 
 from .compiler import Compiler
 from .loader import load_system_definition
+from .project import ProjectScaffold
 
 
 DEFAULT_TEMPLATE = """name: my_system
@@ -31,6 +32,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
     init_parser = subparsers.add_parser("init", help="Create a starter MORPH YAML definition.")
     init_parser.add_argument("path", nargs="?", default="morph.yaml", help="Destination YAML file.")
+
+    new_parser = subparsers.add_parser("new", help="Create a MORPH project from a registered template.")
+    new_parser.add_argument("path", help="Destination directory for the new MORPH project.")
+    new_parser.add_argument("--template", default="service", choices=ProjectScaffold.list_templates(), help="Project template to apply.")
 
     compile_parser = subparsers.add_parser("compile", help="Compile a MORPH YAML definition to a target backend.")
     compile_parser.add_argument("source", help="Path to the YAML file to compile.")
@@ -59,12 +64,26 @@ def _cmd_compile(source: str, target: str, pretty: bool) -> int:
     return 0
 
 
+def _cmd_new(path: str, template_name: str) -> int:
+    try:
+        project_dir = ProjectScaffold.generate(path, template_name)
+    except (FileExistsError, ValueError) as exc:
+        print(str(exc))
+        return 1
+
+    print(f"Created MORPH project at {project_dir} using template '{template_name}'.")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     if args.command == "init":
         return _cmd_init(args.path)
+
+    if args.command == "new":
+        return _cmd_new(args.path, args.template)
 
     if args.command == "compile":
         return _cmd_compile(args.source, args.target, args.pretty)
