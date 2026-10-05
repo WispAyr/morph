@@ -133,6 +133,34 @@ def _build_parser() -> argparse.ArgumentParser:
     history_parser.add_argument("--stream")
     history_parser.add_argument("--kind", action="append", dest="kinds")
 
+    replay_parser = system_sub.add_parser("replay", help="Replay the event history for one entity or the whole system.")
+    replay_parser.add_argument("entity", nargs="?")
+    replay_parser.add_argument("id", nargs="?")
+
+    provenance_parser = system_sub.add_parser("provenance", help="Explain the causal lineage behind an entity instance.")
+    provenance_parser.add_argument("entity")
+    provenance_parser.add_argument("id")
+
+    explain_parser = system_sub.add_parser("explain", help="Summarize the causal story for an entity instance in plain English.")
+    explain_parser.add_argument("entity")
+    explain_parser.add_argument("id")
+
+    review_parser = system_sub.add_parser("review", help="Produce the semantic review object for an entity instance including causal provenance, policy lineage, and approval metadata.")
+    review_parser.add_argument("entity")
+    review_parser.add_argument("id")
+    review_parser.add_argument("--approver")
+    review_parser.add_argument("--approved", action="store_true")
+
+    compare_parser = system_sub.add_parser("compare", help="Compare the actual entity state against the counterfactual path without selected events.")
+    compare_parser.add_argument("entity")
+    compare_parser.add_argument("id")
+    compare_parser.add_argument("--omit-kind", action="append", dest="omit_kinds", default=[], help="Event kind to omit from the alternate replay, e.g. transitioned.")
+
+    counterfactual_parser = system_sub.add_parser("counterfactual", help="Rebuild the state without selected kinds of events to explore alternate outcomes.")
+    counterfactual_parser.add_argument("entity")
+    counterfactual_parser.add_argument("id")
+    counterfactual_parser.add_argument("--omit-kind", action="append", dest="omit_kinds", default=[], help="Event kind to omit from the replay, e.g. transitioned.")
+
     return parser
 
 
@@ -180,11 +208,49 @@ def _cmd_system(args: argparse.Namespace) -> int:
             system = MORPHSystem(definition, store=store)
             print(json.dumps(system.history(stream=args.stream, kinds=args.kinds)))
             return 0
+
+        if command == "replay":
+            system = MORPHSystem(definition, store=store)
+            if args.entity is None:
+                print(json.dumps(system.replay()))
+            elif args.id is None:
+                print(json.dumps(system.replay(args.entity)))
+            else:
+                print(json.dumps(system.replay(args.entity, args.id)))
+            return 0
+
+        if command == "provenance":
+            system = MORPHSystem(definition, store=store)
+            print(json.dumps(system.provenance(args.entity, args.id)))
+            return 0
+
+        if command == "explain":
+            system = MORPHSystem(definition, store=store)
+            print(json.dumps(system.explain(args.entity, args.id)))
+            return 0
+
+        if command == "review":
+            system = MORPHSystem(definition, store=store)
+            print(json.dumps(system.review(args.entity, args.id, approver=getattr(args, "approver", None), approved=getattr(args, "approved", False))))
+            return 0
+
+        if command == "compare":
+            system = MORPHSystem(definition, store=store)
+            omitted = set(args.omit_kinds) if args.omit_kinds else None
+            print(json.dumps(system.explain_diff(args.entity, args.id, omit_kinds=omitted)))
+            return 0
+
+        if command == "counterfactual":
+            system = MORPHSystem(definition, store=store)
+            omitted = set(args.omit_kinds) if args.omit_kinds else None
+            report = system.counterfactual(args.entity, args.id, omit_kinds=omitted)
+            print(json.dumps(report))
+            return 0
     except (OSError, ValueError, TypeError, ImportError, RuntimeError, yaml.YAMLError) as exc:
         print(f"error: {exc}")
         return 1
 
-    print("usage: morph system <definition> --store <file> {observe,act,state,history} ...")
+    print("usage: morph system <definition> --store <file> {observe,act,state,history,replay,provenance,explain,review,compare,counterfactual} ...")
     return 1
 
 

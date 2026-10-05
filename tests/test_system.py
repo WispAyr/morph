@@ -221,6 +221,79 @@ def test_transition_id_expression_targets_another_instance():
     assert sys_.state("worker", "w7")["state"] == "busy"
 
 
+def test_system_can_replay_causal_history_for_an_entity():
+    sys_ = system()
+    _warm(sys_)
+    sys_.act(source="cam1", destination="wall", operator="ewan")
+
+    provenance = sys_.provenance("destination", "wall")
+    assert provenance["entity"] == "destination"
+    assert provenance["id"] == "wall"
+    assert provenance["current_state"]["state"] == "routed"
+    assert provenance["events"][0]["kind"] == "observed"
+    assert any(event["kind"] == "transitioned" for event in provenance["events"])
+
+    replay = sys_.replay("destination", "wall")
+    assert [event["kind"] for event in replay] == [event["kind"] for event in provenance["events"]]
+
+
+def test_system_can_reconstruct_counterfactual_state_without_a_transition():
+    sys_ = system()
+    _warm(sys_)
+    sys_.act(source="cam1", destination="wall", operator="ewan")
+
+    counterfactual = sys_.counterfactual("destination", "wall", omit_kinds={"transitioned"})
+
+    assert counterfactual["entity"] == "destination"
+    assert counterfactual["id"] == "wall"
+    assert counterfactual["current_state"]["state"] == "idle"
+    assert counterfactual["omitted"] == ["transitioned"]
+
+
+def test_system_can_explain_causal_history_in_plain_english():
+    sys_ = system()
+    _warm(sys_)
+    sys_.act(source="cam1", destination="wall", operator="ewan")
+
+    explanation = sys_.explain("destination", "wall")
+
+    assert explanation["entity"] == "destination"
+    assert explanation["id"] == "wall"
+    assert "transitioned" in explanation["summary"].lower()
+    assert "routed" in explanation["current_state"]["state"]
+    assert explanation["narrative"].startswith("destination")
+
+
+def test_system_can_explain_causal_difference_between_actual_and_counterfactual_state():
+    sys_ = system()
+    _warm(sys_)
+    sys_.act(source="cam1", destination="wall", operator="ewan")
+
+    diff = sys_.explain_diff("destination", "wall", omit_kinds={"transitioned"})
+
+    assert diff["entity"] == "destination"
+    assert diff["id"] == "wall"
+    assert diff["before"]["state"] == "idle"
+    assert diff["after"]["state"] == "routed"
+    assert "transitioned" in diff["narrative"]
+    assert "routed" in diff["narrative"]
+
+
+def test_system_can_build_a_semantic_contract_review_object():
+    sys_ = system()
+    _warm(sys_)
+    sys_.act(source="cam1", destination="wall", operator="ewan")
+
+    review = sys_.review("destination", "wall", approver="ewan", approved=True)
+
+    assert review["entity"] == "destination"
+    assert review["id"] == "wall"
+    assert review["approval"]["approved"] is True
+    assert review["approval"]["by"] == "ewan"
+    assert review["policy_lineage"]
+    assert review["provenance"]["current_state"]["state"] == "routed"
+
+
 # --- CLI ---------------------------------------------------------------------------------
 
 

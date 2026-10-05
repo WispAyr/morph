@@ -208,6 +208,163 @@ class MORPHSystem:
 
     # --- introspection ----------------------------------------------------------------
 
+    def replay(self, entity: str | None = None, entity_id: str | None = None, *, after: int = 0, kinds: list[str] | None = None) -> list[dict[str, Any]]:
+        """Return the event history for a system or a specific entity stream.
+
+        This is the causal-history view AI systems need for time-travel style reasoning.
+        """
+        if entity is None and entity_id is not None:
+            raise ValueError("entity_id requires entity")
+        if entity is not None and entity_id is None:
+            stream = stream_for(entity, "*")
+            events = self.store.events(after=after, kinds=kinds)
+            if entity is not None:
+                events = [event for event in events if event.stream.startswith(f"{entity}/")]
+            return [event.to_dict() for event in events]
+        if entity is None:
+            return [event.to_dict() for event in self.store.events(after=after, kinds=kinds)]
+        stream = stream_for(entity, entity_id)
+        return [event.to_dict() for event in self.store.events(stream=stream, after=after, kinds=kinds)]
+
+    def provenance(self, entity: str, entity_id: str) -> dict[str, Any]:
+        """Return a causal summary describing the current state of an entity instance."""
+        events = self.replay(entity, entity_id)
+        current = self.state(entity, entity_id)
+        return {
+            "entity": entity,
+            "id": entity_id,
+            "current_state": current,
+            "events": events,
+            "summary": {
+                "event_count": len(events),
+                "last_kind": events[-1]["kind"] if events else None,
+            },
+        }
+
+    def explain(self, entity: str, entity_id: str) -> dict[str, Any]:
+        """Return a human-readable causal explanation for the current state of an entity."""
+        provenance = self.provenance(entity, entity_id)
+        events = provenance["events"]
+        current = provenance["current_state"]
+        narrative_parts: list[str] = [f"{entity} {entity_id} currently sits in state '{current.get('state', 'unknown')}'."]
+
+        if not events:
+            narrative_parts.append("There are no recorded events for this entity instance.")
+            narrative = " ".join(narrative_parts)
+            return {"entity": entity, "id": entity_id, "current_state": current, "summary": narrative, "narrative": narrative, "events": events}
+
+        transition = next((event for event in reversed(events) if event["kind"] == "transitioned"), None)
+        if transition is not None:
+            data = transition["data"]
+            narrative_parts.append(
+                f"The state transitioned from '{data.get('from')}' to '{data.get('to')}' on '{data.get('on')}', "
+                f"which is the most recent causal change in this event chain."
+            )
+        else:
+            narrative_parts.append("No transitioned state was observed, so the current state is driven by observation history alone.")
+
+        narrative_parts.append(f"The causal chain includes {len(events)} recorded events, beginning with '{events[0]['kind']}' and ending with '{events[-1]['kind']}'.")
+        narrative = " ".join(narrative_parts)
+        return {"entity": entity, "id": entity_id, "current_state": current, "summary": narrative, "narrative": narrative, "events": events}
+
+    def explain_diff(self, entity: str, entity_id: str, *, omit_kinds: set[str] | None = None, omit_seq: int | None = None) -> dict[str, Any]:
+        """Compare the actual entity state against the counterfactual path without selected event kinds."""
+        actual = self.state(entity, entity_id)
+        alternative = self.counterfactual(entity, entity_id, omit_kinds=omit_kinds, omit_seq=omit_seq)
+        before = alternative["current_state"]
+        after = actual
+        delta = {key: {"before": before.get(key), "after": after.get(key)} for key in sorted(set(before) | set(after)) if before.get(key) != after.get(key)}
+        narrative = (
+            f"{entity} {entity_id} would have remained in state '{before.get('state', 'unknown')}' "
+            f"without {', '.join(sorted(omit_kinds or set())) or 'the observed causal change'}, "
+            f"but the actual history moved it to '{after.get('state', 'unknown')}' through the observed transition path."
+        )
+        return {
+            "entity": entity,
+            "id": entity_id,
+            "before": before,
+            "after": after,
+            "delta": delta,
+            "narrative": narrative,
+            "summary": narrative,
+            "omitted": sorted(omit_kinds or set()),
+        }
+
+    def review(self, entity: str, entity_id: str, *, approver: str | None = None, approved: bool | None = None) -> dict[str, Any]:
+        """Return the semantic review object for one entity instance.
+
+        This bundles the causal provenance, policy lineage, and approval metadata in one
+        machine-readable artifact for AI review workflows.
+        """
+        provenance = self.provenance(entity, entity_id)
+        policy_lineage = []
+        for policy in self.ir.policies:
+            if not isinstance(policy, dict):
+                continue
+            result = policy.get("result") or {}
+            policy_lineage.append({
+                "name": policy.get("name", "unknown"),
+                "when": policy.get("when"),
+                "status": result.get("status"),
+                "action": result.get("action"),
+            })
+
+        invariant_lineage = [{
+            "name": item.get("name", "unknown"),
+            "when": item.get("when"),
+        } for item in (self.ir.invariants or []) if isinstance(item, dict)]
+
+        approval = {
+            "approved": bool(approved) if approved is not None else False,
+            "by": approver,
+            "status": "approved" if approved else "pending",
+        }
+
+        summary = (
+            f"{entity} {entity_id} is in state '{provenance['current_state'].get('state', 'unknown')}', "
+            f"with {len(provenance['events'])} causal events, {len(policy_lineage)} policy entries, "
+            f"and {len(invariant_lineage)} invariants in scope."
+        )
+        return {
+            "entity": entity,
+            "id": entity_id,
+            "current_state": provenance["current_state"],
+            "provenance": provenance,
+            "policy_lineage": policy_lineage,
+            "invariant_lineage": invariant_lineage,
+            "approval": approval,
+            "summary": summary,
+            "narrative": summary,
+        }
+
+    def counterfactual(self, entity: str, entity_id: str, *, omit_kinds: set[str] | None = None, omit_seq: int | None = None) -> dict[str, Any]:
+        """Rebuild an entity stream without selected events to estimate alternate behaviour.
+
+        This is the semantic answer to: “what would have happened if this decision/event had
+        not occurred?”
+        """
+        stream = stream_for(entity, entity_id)
+        filtered = [
+            event
+            for event in self.store.events(stream=stream)
+            if (omit_seq is None or event.seq != omit_seq)
+            and (omit_kinds is None or event.kind not in omit_kinds)
+        ]
+
+        projected_store = EventStore()
+        for event in filtered:
+            projected_store.append(event.stream, event.kind, event.data)
+
+        counter = MORPHSystem(self.ir, store=projected_store)
+        return {
+            "entity": entity,
+            "id": entity_id,
+            "current_state": counter.state(entity, entity_id),
+            "events": [event.to_dict() for event in filtered],
+            "omitted": sorted({event.kind for event in self.store.events(stream=stream) if omit_kinds is not None and event.kind in omit_kinds}),
+            "summary": {"event_count": len(filtered)},
+        }
+
     def history(self, stream: str | None = None, kinds: list[str] | None = None) -> list[dict[str, Any]]:
         return [event.to_dict() for event in self.store.events(stream=stream, kinds=kinds)]
 
