@@ -109,3 +109,32 @@ def test_cli_run_parses_override_scalars(tmp_path: Path, capsys) -> None:
     assert main(["run", str(source), "--set", "latency_ms=42"]) == 0
     capsys.readouterr()
     assert main(["run", str(source), "--set", "latency_ms=500"]) == 2
+
+
+def test_cli_diff_reports_invariant_changes(tmp_path: Path, capsys) -> None:
+    baseline = tmp_path / "baseline.yaml"
+    candidate = tmp_path / "candidate.yaml"
+    baseline.write_text(
+        "name: studio\nversion: 0.7.0\nentities:\n  - name: source\n    fields: {status: string, latency_ms: int}\nintent:\n  summary: Only live sources with low latency can route.\ninvariants:\n  - name: live_route\n    when: 'source.status == \"live\" && source.latency_ms < 120'\n",
+        encoding="utf-8",
+    )
+    candidate.write_text(
+        "name: studio\nversion: 0.7.1\nentities:\n  - name: source\n    fields: {status: string, latency_ms: int}\nintent:\n  summary: Only live sources with low latency can route.\ninvariants:\n  - name: live_route\n    when: 'source.status == \"ready\" && source.latency_ms < 120'\n",
+        encoding="utf-8",
+    )
+
+    assert main(["diff", str(baseline), str(candidate)]) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["blocked"] == ["live_route"]
+    assert report["preserved"] == []
+
+    safe = tmp_path / "safe.yaml"
+    safe.write_text(
+        "name: studio\nversion: 0.7.1\nentities:\n  - name: source\n    fields: {status: string, latency_ms: int}\nintent:\n  summary: Only live sources with low latency can route.\ninvariants:\n  - name: live_route\n    when: 'source.status == \"live\" && source.latency_ms < 120'\n  - name: source_is_known\n    when: 'has(source.status)'\n",
+        encoding="utf-8",
+    )
+
+    assert main(["diff", str(baseline), str(safe)]) == 0
+    safe_report = json.loads(capsys.readouterr().out)
+    assert safe_report["preserved"] == ["live_route"]
+    assert safe_report["added"] == ["source_is_known"]

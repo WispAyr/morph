@@ -61,6 +61,11 @@ def _build_parser() -> argparse.ArgumentParser:
     validate_parser = subparsers.add_parser("validate", help="Check a MORPH YAML definition without evaluating it.")
     validate_parser.add_argument("source", help="Path to the YAML file to validate.")
 
+    diff_parser = subparsers.add_parser("diff", help="Compare two MORPH definitions and report semantic-preservation differences.")
+    diff_parser.add_argument("baseline", help="Path to the original MORPH YAML file.")
+    diff_parser.add_argument("candidate", help="Path to the proposed updated MORPH YAML file.")
+    diff_parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output.")
+
     compile_parser = subparsers.add_parser("compile", help="Compile a MORPH YAML definition to a target backend.")
     compile_parser.add_argument("source", help="Path to the YAML file to compile.")
     compile_parser.add_argument("--target", default="python", choices=Compiler.list_targets(), help="Target backend to compile for.")
@@ -208,6 +213,21 @@ def _cmd_validate(source: str) -> int:
     return 0
 
 
+def _cmd_diff(baseline: str, candidate: str, pretty: bool) -> int:
+    try:
+        base_ir = load_system_definition(Path(baseline))
+        cand_ir = load_system_definition(Path(candidate))
+        diff = base_ir.diff(cand_ir)
+        if diff["blocked"]:
+            print(json.dumps(diff, indent=2 if pretty else None))
+            return 1
+        print(json.dumps(diff, indent=2 if pretty else None))
+        return 0
+    except (OSError, ValueError, TypeError, yaml.YAMLError) as exc:
+        print(f"error: {exc}")
+        return 1
+
+
 def _cmd_compile(source: str, target: str, pretty: bool) -> int:
     try:
         definition = load_system_definition(Path(source))
@@ -300,6 +320,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "validate":
         return _cmd_validate(args.source)
+
+    if args.command == "diff":
+        return _cmd_diff(args.baseline, args.candidate, args.pretty)
 
     if args.command == "compile":
         return _cmd_compile(args.source, args.target, args.pretty)

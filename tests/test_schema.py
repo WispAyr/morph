@@ -137,3 +137,95 @@ def test_explain_reports_every_policy():
         {"policy": "deny_slow", "expression": "source.latency_ms > 100", "capabilities_granted": True, "condition_holds": False},
         {"policy": "allow_live", "expression": 'source.status == "live"', "capabilities_granted": True, "condition_holds": True},
     ]
+
+
+def test_morph_ir_supports_canonical_semantic_fields_and_validation():
+    ir = MORPHRuntime.from_dict(
+        {
+            "name": "studio",
+            "version": "0.7.0",
+            "entities": [{"name": "source", "fields": {"status": "string", "latency_ms": "int"}}],
+            "intent": {"summary": "Only live sources with low latency can route."},
+            "invariants": [{"name": "live_route", "when": 'source.status == "live" && source.latency_ms < 120'}],
+            "policies": [{"name": "allow_live", "when": 'source.status == "live" && source.latency_ms < 120', "result": {"status": "allow", "action": "ok"}}],
+        }
+    )
+
+    assert ir.name == "studio"
+    assert ir.evaluate({"source": {"status": "live", "latency_ms": 42}})["status"] == "allow"
+
+    from morph import MORPHIR
+
+    semantic = MORPHIR.from_dict(
+        {
+            "name": "studio",
+            "version": "0.7.0",
+            "entities": [{"name": "source", "fields": {"status": "string", "latency_ms": "int"}}],
+            "intent": {"summary": "Only live sources with low latency can route."},
+            "invariants": [{"name": "live_route", "when": 'source.status == "live" && source.latency_ms < 120'}],
+        }
+    )
+
+    assert semantic.canonicalize()["kind"] == "morph.ir.v1"
+    assert semantic.canonicalize()["intent"]["summary"] == "Only live sources with low latency can route."
+    semantic.validate()
+
+    with pytest.raises(ValueError, match="unknown field 'source.staus'"):
+        MORPHIR.from_dict(
+            {
+                "name": "studio",
+                "version": "0.7.0",
+                "entities": [{"name": "source", "fields": {"status": "string", "latency_ms": "int"}}],
+                "invariants": [{"name": "bad", "when": 'source.staus == "live"'}],
+            }
+        ).validate()
+
+
+def test_morph_ir_preserves_invariants_across_semantic_changes():
+    from morph import MORPHIR
+
+    baseline = MORPHIR.from_dict(
+        {
+            "name": "studio",
+            "version": "0.7.0",
+            "entities": [{"name": "source", "fields": {"status": "string", "latency_ms": "int"}}],
+            "intent": {"summary": "Only live sources with low latency can route."},
+            "invariants": [{"name": "live_route", "when": 'source.status == "live" && source.latency_ms < 120'}],
+        }
+    )
+
+    safe = MORPHIR.from_dict(
+        {
+            "name": "studio",
+            "version": "0.7.1",
+            "entities": [{"name": "source", "fields": {"status": "string", "latency_ms": "int"}}],
+            "intent": {"summary": "Only live sources with low latency can route."},
+            "invariants": [
+                {"name": "live_route", "when": 'source.status == "live" && source.latency_ms < 120'},
+                {"name": "source_is_known", "when": 'has(source.status)'}
+            ],
+        }
+    )
+
+    baseline.validate_change(safe)
+
+    diff = baseline.diff(safe)
+    assert diff["preserved"] == ["live_route"]
+    assert diff["added"] == ["source_is_known"]
+    assert diff["blocked"] == []
+
+    unsafe = MORPHIR.from_dict(
+        {
+            "name": "studio",
+            "version": "0.7.1",
+            "entities": [{"name": "source", "fields": {"status": "string", "latency_ms": "int"}}],
+            "intent": {"summary": "Only live sources with low latency can route."},
+            "invariants": [{"name": "live_route", "when": 'source.status == "ready" && source.latency_ms < 120'}],
+        }
+    )
+
+    with pytest.raises(ValueError, match="preserve invariant 'live_route'"):
+        baseline.validate_change(unsafe)
+
+    blocked = baseline.diff(unsafe)
+    assert blocked["blocked"] == ["live_route"]

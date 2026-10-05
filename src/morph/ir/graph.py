@@ -12,6 +12,7 @@ class ExecutionGraph:
 
     def __init__(self, ir: MORPHIR | dict[str, Any]):
         self.ir = ir if isinstance(ir, MORPHIR) else MORPHIR.from_dict(ir)
+        self.ir.validate()
         self.runtime = MORPHRuntime(
             name=self.ir.name,
             version=self.ir.version,
