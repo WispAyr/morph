@@ -214,6 +214,7 @@ def _check_policy_shapes(runtime: MORPHRuntime, report: Report) -> None:
 
 FOCUS_BIAS = 0.9  # chance a focused sample draws a path's value from the focus policy's literals
 GLOBAL_BIAS = 0.6  # chance an unfocused sample draws from any literal compared with that path
+OTHER_BIAS = 0.2  # chance a focused sample draws another policy's literal for a path its focus does not compare
 
 
 def _grant_paths(runtime: MORPHRuntime, capability: str) -> list[str]:
@@ -314,7 +315,8 @@ class _Sampler:
 
     def value(self, type_name: str, path: str, focus: dict[str, list[Any]] | None, entity: EntityType | None = None, field_name: str | None = None) -> Any:
         choice = self.random.choice
-        for pool, bias in ((focus, FOCUS_BIAS), (self.pools, GLOBAL_BIAS)):
+        global_bias = GLOBAL_BIAS if focus is None else OTHER_BIAS
+        for pool, bias in ((focus, FOCUS_BIAS), (self.pools, global_bias)):
             literals = pool.get(path) if pool else None
             if literals and self.random.random() < bias:
                 shaped = self._from_literal(choice(literals), type_name)
