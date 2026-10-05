@@ -25,10 +25,20 @@ See the Phase 1 findings in [docs/phase1-findings.md](docs/phase1-findings.md).
 python -m pip install -e .[dev]
 pytest -q
 morph init demo.yaml
+morph run demo.yaml --set route.status=ready
 morph compile demo.yaml --target node
 ```
 
-The CLI gives MORPH a real developer workflow: initialize a YAML definition, scaffold a reusable project, load it, and compile it into Python, Node, or SQL execution targets.
+The CLI gives MORPH a real developer workflow: initialize a YAML definition, scaffold a reusable project, evaluate it against a context, and compile it into Python, Node, or SQL execution targets. `morph run` exits 0 on an allow decision and 2 on a deny, so it can gate scripts directly.
+
+## Evaluation semantics
+
+- Decisions are deny-by-default. A policy matches only when every `when` clause holds and every capability it `requires` is granted.
+- A clause may combine operators (`equals`, `lt`, `lte`, `gt`, `gte`, `contains`); all of them must hold.
+- A field that is missing from the context, null, or not comparable with the operand never matches. Evaluation does not raise on bad input.
+- Capabilities resolve through `operator.capabilities` unless the definition declares the capability under `capabilities` with its own `requires` context paths.
+- Every entry point (runtime, planner, workflow, state machine, compiler, CLI) validates the definition before evaluating it.
+- Compiled plans keep each policy's conditions, so the Python, Node, and SQL targets reach the same decision as the runtime. The SQL target emits one parameterised statement per policy and refuses `contains`, which it cannot express.
 
 ```bash
 morph new my_service --template service

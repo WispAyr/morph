@@ -42,12 +42,32 @@ def test_node_target_executes_compiled_plan():
 
 
 def test_sql_target_compiles_to_sql_statement():
-    compiled = {
-        "target": "sql",
+    ir = {
         "name": "studio_control",
         "version": "0.6.0",
-        "sql": "SELECT 'route_source' AS action WHERE source_status = 'live' AND destination_status = 'ready';",
+        "policies": [
+            {
+                "name": "route_allowed",
+                "when": [
+                    {"field": "source.status", "equals": "live"},
+                    {"field": "destination.status", "equals": "ready"},
+                ],
+                "result": {"status": "allow", "action": "route_source"},
+            }
+        ],
     }
+
+    compiled = Compiler.compile(ir, target="sql")
+
+    assert compiled["sql"] == (
+        "SELECT 'allow' AS status, 'route_source' AS action "
+        "WHERE source_status = 'live' AND destination_status = 'ready';"
+    )
+    statement = compiled["statements"][0]
+    assert statement["parameterized_sql"] == (
+        "SELECT 'allow' AS status, 'route_source' AS action WHERE source_status = ? AND destination_status = ?;"
+    )
+    assert statement["params"] == ["live", "ready"]
 
     target = SQLTarget(compiled)
     result = target.execute({"source": {"status": "live"}, "destination": {"status": "ready"}})

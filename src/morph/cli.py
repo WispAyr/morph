@@ -3,11 +3,14 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
+
+import yaml
 
 from .compiler import Compiler
 from .loader import load_system_definition
 from .project import ProjectScaffold
+from .runtime import MORPHRuntime
 
 
 DEFAULT_TEMPLATE = """name: my_system
@@ -26,7 +29,7 @@ policies:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="morph",
-        description="MORPH CLI for loading system definitions and compiling them to execution targets.",
+        description="MORPH CLI for loading system definitions, evaluating them, and compiling them to execution targets.",
     )
     subparsers = parser.add_subparsers(dest="command")
 
@@ -39,8 +42,21 @@ def _build_parser() -> argparse.ArgumentParser:
 
     compile_parser = subparsers.add_parser("compile", help="Compile a MORPH YAML definition to a target backend.")
     compile_parser.add_argument("source", help="Path to the YAML file to compile.")
-    compile_parser.add_argument("--target", default="python", choices=["python", "node", "sql"], help="Target backend to compile for.")
+    compile_parser.add_argument("--target", default="python", choices=Compiler.list_targets(), help="Target backend to compile for.")
     compile_parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output.")
+
+    run_parser = subparsers.add_parser("run", help="Evaluate a MORPH YAML definition against a context.")
+    run_parser.add_argument("source", help="Path to the YAML file to evaluate.")
+    run_parser.add_argument("--context", help="Path to a JSON or YAML file holding the execution context.")
+    run_parser.add_argument(
+        "--set",
+        dest="overrides",
+        action="append",
+        default=[],
+        metavar="PATH=VALUE",
+        help="Set a dotted context path, e.g. --set source.status=live. Values are parsed as YAML scalars.",
+    )
+    run_parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output.")
 
     return parser
 
@@ -57,11 +73,62 @@ def _cmd_init(path: str) -> int:
 
 
 def _cmd_compile(source: str, target: str, pretty: bool) -> int:
-    definition = load_system_definition(Path(source))
-    compiled = Compiler.compile(definition.to_dict(), target=target)
-    payload = json.dumps(compiled, indent=2 if pretty else None)
-    print(payload)
+    try:
+        definition = load_system_definition(Path(source))
+        compiled = Compiler.compile(definition.to_dict(), target=target)
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        print(f"error: {exc}")
+        return 1
+
+    print(json.dumps(compiled, indent=2 if pretty else None))
     return 0
+
+
+def _load_context(path: str | None, overrides: Sequence[str]) -> dict[str, Any]:
+    context: dict[str, Any] = {}
+    if path:
+        loaded = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+        if loaded is None:
+            loaded = {}
+        if not isinstance(loaded, dict):
+            raise ValueError("Context file must hold an object at the top level.")
+        context = loaded
+
+    for override in overrides:
+        key, separator, raw_value = override.partition("=")
+        if not separator or not key:
+            raise ValueError(f"Invalid --set '{override}'. Expected PATH=VALUE.")
+        value = yaml.safe_load(raw_value) if raw_value != "" else ""
+        cursor = context
+        segments = key.split(".")
+        for segment in segments[:-1]:
+            existing = cursor.get(segment)
+            if not isinstance(existing, dict):
+                existing = {}
+                cursor[segment] = existing
+            cursor = existing
+        cursor[segments[-1]] = value
+
+    return context
+
+
+def _cmd_run(source: str, context_path: str | None, overrides: Sequence[str], pretty: bool) -> int:
+    try:
+        definition = load_system_definition(Path(source))
+        context = _load_context(context_path, overrides)
+        runtime = MORPHRuntime(
+            name=definition.name,
+            version=definition.version,
+            policies=definition.policies,
+            capabilities=definition.capabilities,
+        )
+        decision = runtime.evaluate(context)
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        print(f"error: {exc}")
+        return 1
+
+    print(json.dumps(decision, indent=2 if pretty else None))
+    return 0 if decision.get("status") == "allow" else 2
 
 
 def _cmd_new(path: str, template_name: str) -> int:
@@ -87,6 +154,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "compile":
         return _cmd_compile(args.source, args.target, args.pretty)
+
+    if args.command == "run":
+        return _cmd_run(args.source, args.context, args.overrides, args.pretty)
 
     parser.print_help()
     return 0
