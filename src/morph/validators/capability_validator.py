@@ -12,6 +12,7 @@ class CapabilityValidator:
       ``requires`` list, every entry is a dotted context path that must grant it. A path
       that resolves to a list, tuple, set or string grants the capability when it
       contains the capability name; any other value grants it when it is truthy.
+      An explicitly empty ``requires`` list means the capability needs no grant.
     * Otherwise the capability must appear in ``operator.capabilities``.
     """
 
@@ -27,13 +28,14 @@ class CapabilityValidator:
             return []
 
         paths: list[str] = []
-        if isinstance(definition, dict):
-            declared = definition.get("requires", [])
+        if isinstance(definition, dict) and definition.get("requires") is not None:
+            declared = definition["requires"]
             if isinstance(declared, str):
                 declared = [declared]
             if isinstance(declared, list):
                 paths = [path for path in declared if isinstance(path, str) and path]
-
+                if not paths:
+                    return []  # explicitly ungated capability
         if not paths:
             paths = [CapabilityValidator.DEFAULT_GRANT_PATH]
 

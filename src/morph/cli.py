@@ -8,6 +8,7 @@ from typing import Any, Sequence
 import yaml
 
 from .compiler import Compiler
+from .effects import EffectExecutor, load_adapters
 from .ir import MORPHIR
 from .loader import load_system_definition
 from .project import ProjectScaffold
@@ -75,6 +76,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Set a dotted context path, e.g. --set source.status=live. Values are parsed as YAML scalars.",
     )
     run_parser.add_argument("--explain", action="store_true", help="Report how every policy fared, not just the decision.")
+    run_parser.add_argument(
+        "--adapters",
+        metavar="MODULE:ATTR",
+        help="Execute the decision's effect through these adapters (a registry, dict, or factory), e.g. morph.examples.crosspoint:adapters.",
+    )
     run_parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output.")
 
     return parser
@@ -87,6 +93,7 @@ def _build_runtime(definition: MORPHIR) -> MORPHRuntime:
         policies=definition.policies,
         capabilities=definition.capabilities,
         entities=definition.entities,
+        actions=definition.actions,
     )
 
 
@@ -113,6 +120,8 @@ def _cmd_validate(source: str) -> int:
         return 1
 
     summary = f"ok: {definition.name} {definition.version}: {len(runtime.policies)} policies, {len(runtime.schema.entities)} entities"
+    if runtime.capability_specs:
+        summary += f", {len(runtime.capability_specs)} capabilities, {len(runtime.action_specs)} actions"
     if workflow_steps:
         summary += f", {workflow_steps} workflow steps"
     if runtime.schema.empty:
@@ -161,18 +170,33 @@ def _load_context(path: str | None, overrides: Sequence[str]) -> dict[str, Any]:
     return context
 
 
-def _cmd_run(source: str, context_path: str | None, overrides: Sequence[str], explain: bool, pretty: bool) -> int:
+def _cmd_run(
+    source: str,
+    context_path: str | None,
+    overrides: Sequence[str],
+    explain: bool,
+    adapters: str | None,
+    pretty: bool,
+) -> int:
     try:
         definition = load_system_definition(Path(source))
         context = _load_context(context_path, overrides)
         runtime = _build_runtime(definition)
-        decision = runtime.explain(context) if explain else runtime.evaluate(context)
-    except (OSError, ValueError, yaml.YAMLError) as exc:
+        if adapters:
+            executor = EffectExecutor(runtime, load_adapters(adapters))
+            decision = runtime.explain(context) if explain else runtime.evaluate(context)
+            result = executor.execute(decision, context)
+            output: dict[str, Any] = result.to_dict()
+            exit_code = 1 if result.status == "failed" else (0 if decision.get("status") == "allow" else 2)
+        else:
+            output = runtime.explain(context) if explain else runtime.evaluate(context)
+            exit_code = 0 if output.get("status") == "allow" else 2
+    except (OSError, ValueError, TypeError, ImportError, yaml.YAMLError) as exc:
         print(f"error: {exc}")
         return 1
 
-    print(json.dumps(decision, indent=2 if pretty else None))
-    return 0 if decision.get("status") == "allow" else 2
+    print(json.dumps(output, indent=2 if pretty else None))
+    return exit_code
 
 
 def _cmd_new(path: str, template_name: str) -> int:
@@ -203,7 +227,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_compile(args.source, args.target, args.pretty)
 
     if args.command == "run":
-        return _cmd_run(args.source, args.context, args.overrides, args.explain, args.pretty)
+        return _cmd_run(args.source, args.context, args.overrides, args.explain, args.adapters, args.pretty)
 
     parser.print_help()
     return 0

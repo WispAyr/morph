@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .effects import ActionSpec, CapabilitySpec, parse_actions, parse_capabilities
 from .expressions import Predicate, compile_when
 from .schema import Schema
 from .validators import CapabilityValidator, PolicyValidator
@@ -28,6 +29,8 @@ class MORPHRuntime:
 
     When the definition declares entities, policies may only read declared fields (checked
     at construction) and contexts must carry the declared types (checked at evaluation).
+    When it declares actions, every allow decision must name a bound action, and effects
+    run only through :class:`morph.effects.EffectExecutor`.
     """
 
     def __init__(
@@ -37,6 +40,7 @@ class MORPHRuntime:
         policies: list[dict[str, Any]],
         capabilities: dict[str, Any] | None = None,
         entities: Any = None,
+        actions: dict[str, Any] | None = None,
     ):
         errors = PolicyValidator.validate_all(policies)
         if errors:
@@ -46,17 +50,39 @@ class MORPHRuntime:
         self.version = version
         self.policies = policies
         self.capabilities = capabilities or {}
+        self.actions = actions or {}
         self.schema = Schema.from_ir(entities)
+        self.capability_specs: dict[str, CapabilitySpec] = parse_capabilities(self.capabilities)
+        self.action_specs: dict[str, ActionSpec] = parse_actions(self.actions, self.capability_specs, self.schema)
 
         self._predicates: list[Predicate] = []
-        schema_errors: list[str] = []
+        consistency_errors: list[str] = []
         for policy in policies:
+            policy_name = policy.get("name", "unknown")
             predicate = compile_when(policy.get("when"))
             self._predicates.append(predicate)
             for error in self.schema.validate_paths(predicate.paths):
-                schema_errors.append(f"policy '{policy.get('name', 'unknown')}': {error}")
-        if schema_errors:
-            raise ValueError("Policies read fields outside the entity schema: " + "; ".join(schema_errors))
+                consistency_errors.append(f"policy '{policy_name}': {error}")
+
+            required = policy.get("requires") or []
+            if isinstance(required, str):
+                required = [required]
+            if self.capability_specs:
+                for capability in required:
+                    if capability not in self.capability_specs:
+                        consistency_errors.append(
+                            f"policy '{policy_name}' requires undeclared capability '{capability}' "
+                            f"(known: {sorted(self.capability_specs)})"
+                        )
+
+            result = policy.get("result", {})
+            if self.action_specs and result.get("status") == "allow" and result.get("action") not in self.action_specs:
+                consistency_errors.append(
+                    f"policy '{policy_name}' allows action '{result.get('action')}' which is not bound in actions "
+                    f"(known: {sorted(self.action_specs)})"
+                )
+        if consistency_errors:
+            raise ValueError("Invalid MORPH definition: " + "; ".join(consistency_errors))
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "MORPHRuntime":
@@ -69,6 +95,7 @@ class MORPHRuntime:
             policies=data["policies"],
             capabilities=data.get("capabilities"),
             entities=data.get("entities"),
+            actions=data.get("actions"),
         )
 
     def evaluate(self, context: dict[str, Any]) -> dict[str, Any]:
@@ -121,7 +148,9 @@ class MORPHRuntime:
                     "condition_holds": predicate.evaluate(context),
                 }
             )
-        return {**decision, "policies": report}
+        action = self.action_specs.get(decision.get("action"))
+        binding = {"capability": action.capability, "inputs": dict(action.inputs)} if action else None
+        return {**decision, "policies": report, "binding": binding}
 
     def _capability_missing(self, policy: dict[str, Any], context: dict[str, Any]) -> bool:
         required = policy.get("requires")
@@ -132,7 +161,8 @@ class MORPHRuntime:
             required = [required]
 
         for capability in required:
-            definition = self.capabilities.get(capability) if isinstance(self.capabilities, dict) else None
+            spec = self.capability_specs.get(capability)
+            definition = spec.grant_definition() if spec else None
             if CapabilityValidator.validate(capability, context, definition):
                 return True
 

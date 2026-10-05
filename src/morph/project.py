@@ -67,6 +67,19 @@ entities:
       status: string
       load: double
 
+# Capabilities are the only path to side effects. Adapters implement them in code.
+capabilities:
+  request_handler:
+    requires: []
+    inputs: {{status: string}}
+    outputs: {{handled: bool}}
+
+actions:
+  handle_request:
+    capability: request_handler
+    inputs:
+      status: system.status
+
 policies:
   - name: shed_load
     when: has(system.load) && system.load > 0.9
@@ -130,6 +143,7 @@ pytest -q
 morph validate morph.yaml
 morph run morph.yaml --set system.status=ready
 morph run morph.yaml --set system.status=ready --set system.load=0.95 --explain
+morph run morph.yaml --set system.status=ready --adapters {package}:ADAPTERS
 morph compile morph.yaml --target node
 ```
 """,
@@ -139,7 +153,25 @@ morph compile morph.yaml --target node
     (project_dir / ".gitignore").write_text("__pycache__/\n.pytest_cache/\n.venv/\n*.pyc\n*.egg-info/\n", encoding="utf-8")
 
     (package_dir / "__init__.py").write_text(
-        '"""Generated MORPH service package."""\n\nfrom .runtime import ServiceRuntime\n\n__all__ = ["ServiceRuntime"]\n',
+        '"""Generated MORPH service package."""\n\nfrom .adapters import ADAPTERS\nfrom .runtime import ServiceRuntime\n\n__all__ = ["ADAPTERS", "ServiceRuntime"]\n',
+        encoding="utf-8",
+    )
+
+    (package_dir / "adapters.py").write_text(
+        '''"""Adapters implement this service's capabilities. They are the only code that performs effects."""
+
+from __future__ import annotations
+
+from typing import Any
+
+
+def handle_request(inputs: dict[str, Any]) -> dict[str, Any]:
+    # Replace with the real side effect. Raise morph.EffectFailure for declared failure modes.
+    return {"handled": inputs["status"] == "ready"}
+
+
+ADAPTERS = {"request_handler": handle_request}
+''',
         encoding="utf-8",
     )
 
@@ -165,6 +197,7 @@ class ServiceRuntime(MORPHRuntime):
             policies=definition.policies,
             capabilities=definition.capabilities,
             entities=definition.entities,
+            actions=definition.actions,
         )
 ''',
         encoding="utf-8",
@@ -172,7 +205,9 @@ class ServiceRuntime(MORPHRuntime):
 
     (project_dir / "tests").mkdir()
     (project_dir / "tests" / "test_runtime.py").write_text(
-        f'''from {package} import ServiceRuntime
+        f'''from morph import EffectExecutor
+
+from {package} import ADAPTERS, ServiceRuntime
 
 
 def test_generated_definition_allows_ready_system() -> None:
@@ -181,6 +216,15 @@ def test_generated_definition_allows_ready_system() -> None:
     assert runtime.evaluate({{"system": {{"status": "ready"}}}})["status"] == "allow"
     assert runtime.evaluate({{"system": {{"status": "down"}}}})["status"] == "deny"
     assert runtime.evaluate({{"system": {{"status": "ready", "load": 0.95}}}})["policy"] == "shed_load"
+
+
+def test_generated_effect_runs_through_the_adapter() -> None:
+    executor = EffectExecutor(ServiceRuntime.load(), ADAPTERS)
+
+    result = executor.run({{"system": {{"status": "ready"}}}})
+
+    assert result.status == "executed"
+    assert result.outputs == {{"handled": True}}
 ''',
         encoding="utf-8",
     )

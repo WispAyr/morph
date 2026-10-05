@@ -1,5 +1,16 @@
 from .compiler import Compiler, NodeTarget, PythonTarget, SQLTarget
-from .expressions import ExpressionError, Predicate, compile_when
+from .effects import (
+    ActionSpec,
+    AdapterRegistry,
+    CapabilitySpec,
+    EffectExecutor,
+    EffectFailure,
+    EffectLog,
+    EffectRecord,
+    ExecutionResult,
+    load_adapters,
+)
+from .expressions import EvaluationError, Expression, ExpressionError, Predicate, compile_value, compile_when
 from .ir import ExecutionGraph, MORPHIR
 from .loader import load_system_definition
 from .planner import ExecutionPlanner
@@ -27,8 +38,20 @@ __all__ = [
     "ProjectScaffold",
     "Schema",
     "EntityType",
+    "Expression",
     "Predicate",
     "ExpressionError",
+    "EvaluationError",
     "compile_when",
+    "compile_value",
+    "CapabilitySpec",
+    "ActionSpec",
+    "AdapterRegistry",
+    "EffectExecutor",
+    "EffectFailure",
+    "EffectLog",
+    "EffectRecord",
+    "ExecutionResult",
+    "load_adapters",
     "load_system_definition",
 ]

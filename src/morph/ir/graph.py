@@ -18,6 +18,7 @@ class ExecutionGraph:
             policies=self.ir.policies,
             capabilities=self.ir.capabilities,
             entities=self.ir.entities,
+            actions=self.ir.actions,
         )
 
     @classmethod

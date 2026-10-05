@@ -61,6 +61,45 @@ policies:                      # evaluated in order; first match decides
 
 Conditions are [CEL](https://cel.dev) expressions. CEL is typed, deterministic, and not Turing-complete, so a condition can always be checked and explained. It gives you `&&`, `||`, `!`, comparisons, `in`, `has()` for optional fields, `size()`, string functions, and the collection macros `all`, `exists`, `filter`, and `map`. The original structured clause form (`{field, equals|lt|lte|gt|gte|contains}`) is still accepted and is translated to CEL.
 
+## Effects
+
+Capabilities are the only path to side effects. A capability is a typed interface, an action binds a decision's action name to it, and an adapter implements it in code:
+
+```yaml
+capabilities:
+  route_control:
+    requires: [operator.capabilities]           # grant paths; [] means ungated
+    inputs: {source: string, destination: string, operator: string}
+    outputs: {route_id: string, previous_source: string}
+    failures: [destination_locked, router_busy]  # codes the adapter may raise
+    idempotency: [source, destination]           # inputs that identify a repeat
+    retries: 2                                   # for retryable failures only
+
+actions:
+  route_source:
+    capability: route_control
+    inputs:                                      # CEL expressions over the context
+      source: source.id
+      destination: destination.id
+      operator: operator.id
+```
+
+```python
+from morph import EffectExecutor, EffectFailure
+
+def route(inputs):                               # the adapter
+    if locked(inputs["destination"]):
+        raise EffectFailure("destination_locked", retryable=False)
+    return {"route_id": ..., "previous_source": ...}
+
+executor = EffectExecutor(runtime, {"route_control": route, "notify": notify})
+result = executor.run(context)                   # evaluate, then execute
+result.status                                    # executed | skipped | failed | denied | unbound
+executor.log.records()                           # every attempt, with inputs, outputs, error, timing
+```
+
+The executor re-checks the capability grant before calling an adapter, type-checks inputs and outputs against the capability, skips a repeat with the same idempotency key, retries only failures the adapter marks retryable, and turns adapter exceptions into failure records rather than crashes. Once a definition declares `actions`, every allow policy must name a bound action, and this is checked at load. `morph run --adapters package.module:ATTR` executes from the command line. The worked example in `src/morph/examples/crosspoint.yaml` drives a fake studio router.
+
 ## Evaluation semantics
 
 - Decisions are deny-by-default. A policy matches only when its condition holds and every capability it `requires` is granted.

@@ -55,13 +55,34 @@ def infer_type(value: Any) -> str:
     return "any"
 
 
-def _matches_type(value: Any, type_name: str) -> bool:
+def matches_type(value: Any, type_name: str) -> bool:
     allowed = FIELD_TYPES[type_name]
     if allowed is None:
         return True
     if type_name in ("int", "double") and isinstance(value, bool):
         return False
     return isinstance(value, allowed)
+
+
+_matches_type = matches_type
+
+
+def validate_typed_fields(values: Any, declared: dict[str, str], label: str, *, require_all: bool) -> list[str]:
+    """Check a dict of values against declared field types. Shared by schema and capabilities."""
+    if not isinstance(values, dict):
+        return [f"{label} must be an object"]
+    errors: list[str] = []
+    for name, type_name in declared.items():
+        if name not in values or values[name] is None:
+            if require_all:
+                errors.append(f"{label}.{name} is required ({type_name})")
+            continue
+        if not matches_type(values[name], type_name):
+            errors.append(f"{label}.{name} must be {type_name}, got {infer_type(values[name])}")
+    unknown = set(values) - set(declared)
+    if unknown and require_all:
+        errors.append(f"{label} has undeclared fields: {sorted(unknown)}")
+    return errors
 
 
 @dataclass

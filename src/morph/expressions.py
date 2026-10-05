@@ -37,6 +37,36 @@ class ExpressionError(ValueError):
     """Raised when a condition cannot be translated or parsed."""
 
 
+class EvaluationError(ValueError):
+    """Raised when a value expression cannot be evaluated against a context."""
+
+
+def cel_to_python(value: Any) -> Any:
+    """Convert a CEL result into plain Python values."""
+    if isinstance(value, Exception):
+        # celpy can return a CELEvalError as a value instead of raising it.
+        raise EvaluationError(str(value))
+    if value is None or isinstance(value, celtypes.NullType):
+        return None
+    if isinstance(value, celtypes.BoolType):
+        return bool(value)
+    if isinstance(value, (celtypes.IntType, celtypes.UintType)):
+        return int(value)
+    if isinstance(value, celtypes.DoubleType):
+        return float(value)
+    if isinstance(value, celtypes.StringType):
+        return str(value)
+    if isinstance(value, celtypes.BytesType):
+        return bytes(value)
+    if isinstance(value, celtypes.ListType):
+        return [cel_to_python(item) for item in value]
+    if isinstance(value, celtypes.MapType):
+        return {cel_to_python(key): cel_to_python(item) for key, item in value.items()}
+    if isinstance(value, (celtypes.TimestampType, celtypes.DurationType)):
+        return str(value)
+    return value
+
+
 def cel_literal(value: Any) -> str:
     """Render a Python value as a CEL literal."""
     if value is None:
@@ -94,8 +124,8 @@ def when_to_cel(when: Any) -> str:
     raise ExpressionError("when must be a CEL string, a list of CEL strings, or a list of clause objects")
 
 
-class Predicate:
-    """A compiled condition: its CEL source, the context paths it reads, and an evaluator."""
+class Expression:
+    """A compiled CEL expression: its source, the context paths it reads, and an evaluator."""
 
     __slots__ = ("source", "paths", "_program")
 
@@ -109,24 +139,45 @@ class Predicate:
         self.paths: frozenset[str] = frozenset(_collect_paths(ast))
         self._program = _ENV.program(ast)
 
-    def evaluate(self, context: dict[str, Any]) -> bool:
+    def value(self, context: dict[str, Any]) -> Any:
+        """Evaluate to a Python value. Raises EvaluationError when the context cannot satisfy it."""
         if not isinstance(context, dict):
-            return False
+            raise EvaluationError("context must be an object")
         try:
             activation = celpy.json_to_cel(context)
             result = self._program.evaluate(activation)
-        except Exception:
-            # Missing field, incomparable types, unsupported value: never a match.
-            return False
-        return isinstance(result, celtypes.BoolType) and bool(result)
+        except EvaluationError:
+            raise
+        except Exception as exc:
+            raise EvaluationError(f"{self.source!r}: {exc}") from exc
+        return cel_to_python(result)
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
-        return f"Predicate({self.source!r})"
+        return f"{type(self).__name__}({self.source!r})"
+
+
+class Predicate(Expression):
+    """A compiled condition. Evaluation never raises: anything but `true` is a non-match."""
+
+    __slots__ = ()
+
+    def evaluate(self, context: dict[str, Any]) -> bool:
+        try:
+            result = self.value(context)
+        except EvaluationError:
+            # Missing field, incomparable types, unsupported value: never a match.
+            return False
+        return result is True
 
 
 @lru_cache(maxsize=2048)
 def compile_expression(source: str) -> Predicate:
     return Predicate(source)
+
+
+@lru_cache(maxsize=2048)
+def compile_value(source: str) -> Expression:
+    return Expression(source)
 
 
 def compile_when(when: Any) -> Predicate:

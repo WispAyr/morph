@@ -64,6 +64,7 @@ class Compiler:
             policies=ir.get("policies", []),
             capabilities=ir.get("capabilities", {}),
             entities=ir.get("entities"),
+            actions=ir.get("actions"),
         )
 
         actions = []
@@ -83,7 +84,8 @@ class Compiler:
             "name": runtime.name,
             "version": runtime.version,
             "entities": runtime.schema.to_dict(),
-            "capabilities": dict(runtime.capabilities),
+            "capabilities": {name: spec.to_dict() for name, spec in runtime.capability_specs.items()},
+            "actions": {name: spec.to_dict() for name, spec in runtime.action_specs.items()},
             "plan": actions,
         }
 
@@ -151,6 +153,7 @@ def _runtime_from_plan(compiled: dict[str, Any]) -> MORPHRuntime:
         ],
         capabilities=compiled.get("capabilities", {}),
         entities=compiled.get("entities"),
+        actions=compiled.get("actions"),
     )
 
 

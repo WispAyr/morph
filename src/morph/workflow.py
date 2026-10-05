@@ -23,6 +23,7 @@ class WorkflowEngine:
             policies=getattr(ir, "policies", []),
             capabilities=getattr(ir, "capabilities", {}),
             entities=getattr(ir, "entities", None),
+            actions=getattr(ir, "actions", None),
         )
         self.schema = self.runtime.schema
 
