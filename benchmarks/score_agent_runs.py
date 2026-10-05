@@ -44,14 +44,8 @@ def _validate_run(run: Any, index: int) -> None:
     if analysis.get("relationship") not in RELATIONSHIPS:
         raise ValueError(f"{label}.analysis.relationship must be one of {sorted(RELATIONSHIPS)}")
 
-    judge = run.get("judge")
-    if not isinstance(judge, dict):
-        raise ValueError(f"{label}.judge must be an object")
-    for key in ("implementation_complete", "tests_passed", "simulation_passed"):
-        if not isinstance(judge.get(key), bool):
-            raise ValueError(f"{label}.judge.{key} must be a Boolean")
-    if judge.get("invariants_status") not in INVARIANT_STATUSES:
-        raise ValueError(f"{label}.judge.invariants_status must be one of {sorted(INVARIANT_STATUSES)}")
+    if "judge" in run or "evaluation" in run:
+        raise ValueError(f"{label} must not contain evaluator-owned fields")
 
     if not isinstance(run.get("human_interventions"), int) or run["human_interventions"] < 0:
         raise ValueError(f"{label}.human_interventions must be a non-negative integer")
