@@ -130,3 +130,35 @@ def test_crosspoint_pilot_reference_matches_semantics_and_decisions():
     )
     assert execution.status == "executed"
     assert system.state("destination", "wall")["state"] == "routed"
+
+def test_score_runs_rejects_agent_supplied_judge_fields():
+    run = _run("direct_source", affected=[])
+    run["judge"] = {"implementation_complete": True}
+    with pytest.raises(ValueError, match="evaluator-owned fields"):
+        score_runs([run], {"tasks": {"pilot": {"affected_subjects": [], "relationship": "broader"}}}, [])
+
+
+def test_classify_equivalence_does_not_call_different_policies_identical_without_invariants():
+    baseline = MORPHIR.from_dict({
+        "name": "x",
+        "policies": [{"name": "allow_route", "when": "source.status == 'live'"}],
+    })
+    candidate = MORPHIR.from_dict({
+        "name": "x",
+        "policies": [{"name": "allow_route", "when": "source.status == 'faulted'"}],
+    })
+    assert baseline.structurally_equal(candidate) is False
+    assert baseline.classify_equivalence(candidate) == "CONFLICTING"
+
+
+def test_classify_equivalence_distinguishes_structural_and_semantic_equality():
+    baseline = MORPHIR.from_dict({
+        "name": "x",
+        "policies": [{"name": "allow_route", "when": "source.latency_ms < 120"}],
+    })
+    candidate = MORPHIR.from_dict({
+        "name": "x",
+        "policies": [{"name": "allow_route", "when": "source.latency_ms <= 119"}],
+    })
+    assert baseline.structurally_equal(candidate) is False
+    assert baseline.classify_equivalence(candidate) in {"EQUIVALENT", "UNKNOWN"}
