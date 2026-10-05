@@ -212,9 +212,9 @@ def _check_policy_shapes(runtime: MORPHRuntime, report: Report) -> None:
 # --- sampled reachability --------------------------------------------------------------
 
 
-FOCUS_BIAS = 0.9  # chance a focused sample draws a path's value from the focus policy's literals
-GLOBAL_BIAS = 0.6  # chance an unfocused sample draws from any literal compared with that path
-OTHER_BIAS = 0.2  # chance a focused sample draws another policy's literal for a path its focus does not compare
+FOCUS_BIAS = 0.9  # chance a focused sample satisfies one of the focus policy's constraints on a path
+AVOID_BIAS = 0.8  # chance a focused sample violates another policy's constraint on a path its focus ignores
+GLOBAL_BIAS = 0.6  # chance an unfocused sample satisfies some policy's constraint on a path
 
 
 def _grant_paths(runtime: MORPHRuntime, capability: str) -> list[str]:
@@ -237,31 +237,31 @@ class _Sampler:
         self.random = random.Random(seed)
         self.schema = runtime.schema
 
-        # path -> literals anything compares it with (policies, actions, transitions, grants)
-        self.pools: dict[str, list[Any]] = {}
-        # per policy: path -> literals that policy compares it with, plus the paths it reads
-        self.focus_pools: list[dict[str, list[Any]]] = []
+        # path -> (operator, literal) constraints anything places on it (policies, actions, transitions, grants)
+        self.pools: dict[str, list[tuple[str, Any]]] = {}
+        # per policy: path -> that policy's constraints, plus the paths it reads
+        self.focus_pools: list[dict[str, list[tuple[str, Any]]]] = []
         self.focus_paths: list[set[str]] = []
 
         for policy, predicate in zip(runtime.policies, runtime._predicates):
-            pool: dict[str, list[Any]] = {}
-            self._merge(pool, predicate.comparisons)
+            pool: dict[str, list[tuple[str, Any]]] = {}
+            self._merge(pool, predicate.constraints)
             for capability in _policy_requires(policy):
                 for path in _grant_paths(runtime, capability):
-                    self._merge(pool, {path: (capability,)})
+                    self._merge(pool, {path: (("contains_in", capability),)})
             self.focus_pools.append(pool)
             self.focus_paths.append(set(predicate.paths) | set(pool))
             self._merge(self.pools, pool)
         for action in runtime.action_specs.values():
             for binding in action._bindings.values():
-                if hasattr(binding, "comparisons"):
-                    self._merge(self.pools, binding.comparisons)
+                if hasattr(binding, "constraints"):
+                    self._merge(self.pools, binding.constraints)
         for entity in self.schema.entities.values():
             for transition in entity.transitions:
                 if transition.when is not None:
-                    self._merge(self.pools, transition.when.comparisons)
+                    self._merge(self.pools, transition.when.constraints)
 
-        literals = [value for values in self.pools.values() for value in values]
+        literals = [literal for pairs in self.pools.values() for _, literal in pairs]
         self.strings = sorted({value for value in literals if isinstance(value, str)} | set(runtime.capability_specs) | {"", "other"})
         ints = {value for value in literals if isinstance(value, int) and not isinstance(value, bool)}
         self.ints = sorted(ints | {value + 1 for value in ints} | {value - 1 for value in ints} | {0, 1, -1, 1000})
@@ -287,44 +287,83 @@ class _Sampler:
                 if value not in bucket:
                     bucket.append(value)
 
-    def _from_literal(self, literal: Any, type_name: str) -> Any:
-        """Shape a compared literal into a value of the declared type, or None if it cannot."""
+    def _shape(self, operator: str, literal: Any, type_name: str, *, satisfy: bool) -> Any:
+        """A value of the declared type that satisfies (or violates) `path <operator> literal`.
+
+        Returns None when the literal cannot be shaped into the type.
+        """
         choice = self.random.choice
-        if isinstance(literal, bool):
-            return literal if type_name in ("bool", "any") else None
-        if isinstance(literal, int):
+        numeric = isinstance(literal, (int, float)) and not isinstance(literal, bool)
+        if numeric and type_name in ("int", "double", "any"):
+            step = 1 if isinstance(literal, int) and type_name != "double" else 0.5
+            below = [literal - step, literal - 2 * step, literal // 2 if isinstance(literal, int) else literal / 2]
+            above = [literal + step, literal + 2 * step, literal * 2]
+            if operator == "<":
+                pool = below if satisfy else [literal] + above
+            elif operator == "<=":
+                pool = below + [literal] if satisfy else above
+            elif operator == ">":
+                pool = above if satisfy else [literal] + below
+            elif operator == ">=":
+                pool = above + [literal] if satisfy else below
+            elif operator == "!=":
+                pool = below + above if satisfy else [literal]
+            else:  # == and anything else
+                pool = [literal] if satisfy else below + above
+            value = choice(pool)
             if type_name == "int":
-                return choice([literal - 1, literal, literal + 1, literal // 2, literal * 2])
+                return int(value)
             if type_name == "double":
-                return float(choice([literal - 1, literal, literal + 1])) + choice([0.0, 0.5, -0.5])
-            if type_name == "any":
-                return literal
-            return None
-        if isinstance(literal, float):
-            if type_name in ("double", "any"):
-                return choice([literal - 0.5, literal, literal + 0.5])
-            return None
+                return float(value)
+            return value
+        if isinstance(literal, bool) and type_name in ("bool", "any"):
+            wants = literal if operator != "!=" else not literal
+            return wants if satisfy else not wants
         if isinstance(literal, str):
-            if type_name in ("string", "any"):
-                return literal
+            others = [value for value in self.strings if value != literal] or ["other"]
             if type_name == "list":
-                extras = self.random.sample(self.strings, min(choice([0, 1, 2]), len(self.strings)))
-                return [literal] + [value for value in extras if value != literal]
+                extras = self.random.sample(others, min(choice([0, 1, 2]), len(others)))
+                if operator in ("contains_in", "contains"):
+                    return [literal] + extras if satisfy else extras
+                return [literal] + extras if satisfy else extras
+            if type_name in ("string", "any"):
+                if operator == "!=":
+                    return choice(others) if satisfy else literal
+                if operator == "startsWith":
+                    return literal + choice(["", "-x"]) if satisfy else choice(others)
+                if operator == "endsWith":
+                    return choice(["", "x-"]) + literal if satisfy else choice(others)
+                if operator == "contains":
+                    return choice(["", "x"]) + literal + choice(["", "y"]) if satisfy else choice(others)
+                return literal if satisfy else choice(others)
             return None
         return None
 
-    def value(self, type_name: str, path: str, focus: dict[str, list[Any]] | None, entity: EntityType | None = None, field_name: str | None = None) -> Any:
+    def value(self, type_name: str, path: str, focus: dict[str, list[tuple[str, Any]]] | None, entity: EntityType | None = None, field_name: str | None = None) -> Any:
         choice = self.random.choice
-        global_bias = GLOBAL_BIAS if focus is None else OTHER_BIAS
-        for pool, bias in ((focus, FOCUS_BIAS), (self.pools, global_bias)):
-            literals = pool.get(path) if pool else None
-            if literals and self.random.random() < bias:
-                shaped = self._from_literal(choice(literals), type_name)
-                if shaped is not None:
-                    if entity is not None and field_name == STATE_FIELD and entity.stateful and shaped not in entity.states:
-                        break
-                    return shaped
-        if entity is not None and field_name == STATE_FIELD and entity.stateful:
+        stateful = entity is not None and field_name == STATE_FIELD and entity.stateful
+
+        def acceptable(shaped: Any) -> bool:
+            return shaped is not None and (not stateful or shaped in entity.states)
+
+        focus_pairs = focus.get(path) if focus else None
+        if focus_pairs and self.random.random() < FOCUS_BIAS:
+            operator, literal = choice(focus_pairs)
+            shaped = self._shape(operator, literal, type_name, satisfy=True)
+            if acceptable(shaped):
+                return shaped
+        other_pairs = self.pools.get(path)
+        if other_pairs and not focus_pairs and focus is not None and self.random.random() < AVOID_BIAS:
+            operator, literal = choice(other_pairs)
+            shaped = self._shape(operator, literal, type_name, satisfy=False)
+            if acceptable(shaped):
+                return shaped
+        if other_pairs and focus is None and self.random.random() < GLOBAL_BIAS:
+            operator, literal = choice(other_pairs)
+            shaped = self._shape(operator, literal, type_name, satisfy=True)
+            if acceptable(shaped):
+                return shaped
+        if stateful:
             return choice(entity.states)
         if type_name == "string":
             return choice(self.strings)

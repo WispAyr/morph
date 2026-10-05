@@ -127,7 +127,7 @@ def when_to_cel(when: Any) -> str:
 class Expression:
     """A compiled CEL expression: its source, the context paths it reads, and an evaluator."""
 
-    __slots__ = ("source", "paths", "literals", "comparisons", "_program")
+    __slots__ = ("source", "paths", "literals", "comparisons", "constraints", "_program")
 
     def __init__(self, source: str):
         try:
@@ -138,8 +138,12 @@ class Expression:
         self.source = source
         self.paths: frozenset[str] = frozenset(_collect_paths(ast))
         self.literals: tuple[Any, ...] = tuple(_collect_literals(ast))
+        constraints = _collect_comparisons(ast)
+        # path -> ((operator, literal), ...) with the path on the left-hand side
+        self.constraints: dict[str, tuple[tuple[str, Any], ...]] = {path: tuple(pairs) for path, pairs in constraints.items()}
+        # path -> (literal, ...) for callers that only care about the values
         self.comparisons: dict[str, tuple[Any, ...]] = {
-            path: tuple(values) for path, values in _collect_comparisons(ast).items()
+            path: tuple(dict.fromkeys(literal for _, literal in pairs)) for path, pairs in constraints.items()
         }
         self._program = _ENV.program(ast)
 
@@ -323,26 +327,42 @@ def _single_literal(node: Any) -> Any:
     return _NO_LITERAL
 
 
-def _collect_comparisons(ast: Tree) -> dict[str, list[Any]]:
-    """Map each context path to the literals it is compared with (==, <, in, methods...)."""
-    out: dict[str, list[Any]] = {}
+_RELATION_OPS = {
+    "relation_eq": "==", "relation_ne": "!=", "relation_lt": "<", "relation_le": "<=",
+    "relation_gt": ">", "relation_ge": ">=", "relation_in": "in",
+}
+_FLIPPED_OPS = {"==": "==", "!=": "!=", "<": ">", "<=": ">=", ">": "<", ">=": "<=", "in": "contains_in"}
 
-    def add(path: str | None, value: Any) -> None:
+
+def _collect_comparisons(ast: Tree) -> dict[str, list[tuple[str, Any]]]:
+    """Map each context path to (operator, literal) pairs it is compared with.
+
+    The operator is normalised so the path is on the left: ``10 >= g`` records ``("<=", 10)``
+    for ``g``. ``"x" in path`` records ``("contains_in", "x")``, i.e. the path must contain
+    the literal; ``path in [...]`` is not recorded. Method calls record the method name.
+    """
+    out: dict[str, list[tuple[str, Any]]] = {}
+
+    def add(path: str | None, operator: str, value: Any) -> None:
         if path is None or value is _NO_LITERAL:
             return
         bucket = out.setdefault(path, [])
-        if value not in bucket:
-            bucket.append(value)
+        if (operator, value) not in bucket:
+            bucket.append((operator, value))
 
     for node in ast.iter_subtrees_topdown():
         if node.data == "relation" and len(node.children) == 2:
-            operator, right = node.children
-            if isinstance(operator, Tree) and operator.data.startswith("relation_") and operator.children:
-                left = operator.children[0]
-                add(_dotted(left), _single_literal(right))
-                add(_dotted(right), _single_literal(left))
+            operator_node, right = node.children
+            if isinstance(operator_node, Tree) and operator_node.data in _RELATION_OPS and operator_node.children:
+                operator = _RELATION_OPS[operator_node.data]
+                left = operator_node.children[0]
+                if operator == "in":
+                    add(_dotted(right), "contains_in", _single_literal(left))
+                else:
+                    add(_dotted(left), operator, _single_literal(right))
+                    add(_dotted(right), _FLIPPED_OPS[operator], _single_literal(left))
         elif node.data == "member_dot_arg" and len(node.children) > 2:
-            receiver, args = node.children[0], node.children[2]
+            receiver, method, args = node.children[0], str(node.children[1]), node.children[2]
             if isinstance(args, Tree) and len(args.children) == 1:
-                add(_dotted(receiver), _single_literal(args.children[0]))
+                add(_dotted(receiver), method, _single_literal(args.children[0]))
     return out
