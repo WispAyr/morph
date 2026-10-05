@@ -180,12 +180,13 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("runs", type=Path, help="JSON Lines file containing paired agent run records")
     parser.add_argument("--reference", type=Path, required=True, help="JSON reference labels keyed by task_id")
+    parser.add_argument("--evaluations", type=Path, required=True, help="JSON Lines produced by the independent evaluator")
     parser.add_argument("--pretty", action="store_true")
     args = parser.parse_args()
 
     try:
         reference = json.loads(args.reference.read_text(encoding="utf-8"))
-        result = score_runs(_read_jsonl(args.runs), reference)
+        result = score_runs(_read_jsonl(args.runs), reference, _read_jsonl(args.evaluations))
     except (OSError, ValueError, TypeError) as exc:
         parser.error(str(exc))
     print(json.dumps(result, indent=2 if args.pretty else None))
