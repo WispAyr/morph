@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .validators import PolicyValidator
+from .validators import CapabilityValidator, PolicyValidator
 
 
 class MORPHRuntime:
@@ -34,6 +34,8 @@ class MORPHRuntime:
 
     def evaluate(self, context: dict[str, Any]) -> dict[str, Any]:
         for policy in self.policies:
+            if self._capability_missing(policy, context):
+                continue
             if self._matches(policy.get("when", []), context):
                 result = dict(policy.get("result", {"status": "deny", "action": "raise_alert"}))
                 return {
@@ -52,6 +54,21 @@ class MORPHRuntime:
             "reason": "no_matching_policy",
             "trace": [],
         }
+
+    def _capability_missing(self, policy: dict[str, Any], context: dict[str, Any]) -> bool:
+        required = policy.get("requires")
+        if not required:
+            return False
+
+        if isinstance(required, str):
+            required = [required]
+
+        for capability in required:
+            errors = CapabilityValidator.validate(capability, context)
+            if errors:
+                return True
+
+        return False
 
     def _matches(self, filters: list[dict[str, Any]], context: dict[str, Any]) -> bool:
         for item in filters:
