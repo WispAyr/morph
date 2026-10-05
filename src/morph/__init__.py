@@ -1,3 +1,4 @@
+from .compiler import Compiler, PythonTarget
 from .ir import ExecutionGraph, MORPHIR
 from .loader import load_system_definition
 from .planner import ExecutionPlanner
@@ -15,5 +16,7 @@ __all__ = [
     "StateMachine",
     "ExecutionPlanner",
     "WorkflowEngine",
+    "Compiler",
+    "PythonTarget",
     "load_system_definition",
 ]
