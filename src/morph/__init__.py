@@ -1,3 +1,4 @@
+from .ai import SemanticAI
 from .compiler import Compiler, NodeTarget, PythonTarget, SQLTarget
 from .effects import (
     ActionSpec,
@@ -15,6 +16,7 @@ from .ir import ExecutionGraph, MORPHIR
 from .loader import load_system_definition
 from .planner import ExecutionPlanner
 from .project import ProjectScaffold, ProjectTemplate
+from .reasoner import SemanticReasoner
 from .runtime import MORPHRuntime
 from .schema import EntityType, Schema
 from .state import StateMachine
@@ -25,6 +27,8 @@ from .workflow import WorkflowEngine
 
 __all__ = [
     "MORPHIR",
+    "SemanticAI",
+    "SemanticReasoner",
     "ExecutionGraph",
     "MORPHRuntime",
     "PolicyValidator",

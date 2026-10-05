@@ -132,9 +132,13 @@ class MORPHSystem:
         return context
 
     def decide(self, context: dict[str, Any]) -> dict[str, Any]:
-        decision = self.runtime.evaluate(context)
-        self.store.append(SYSTEM_STREAM, DECIDED, {"context": context, "decision": decision})
+        decision, _ = self._record_decision(context)
         return decision
+
+    def _record_decision(self, context: dict[str, Any]) -> tuple[dict[str, Any], Event]:
+        decision = self.runtime.evaluate(context)
+        event = self.store.append(SYSTEM_STREAM, DECIDED, {"context": context, "decision": decision})
+        return decision, event
 
     def act(self, context: dict[str, Any] | None = None, **bindings: str) -> ExecutionResult:
         """Decide, execute the effect, and advance entity state machines on the outcome."""
@@ -142,7 +146,7 @@ class MORPHSystem:
             raise RuntimeError("MORPHSystem was created without adapters; pass adapters to execute effects")
         if context is None:
             context = self.context(**bindings)
-        decision = self.decide(context)
+        decision, decision_event = self._record_decision(context)
         result = self.executor.execute(decision, context)
         if result.action is not None:
             outcome = {"executed": "succeeded", "skipped": "skipped", "failed": "failed", "denied": "denied"}[result.status]
@@ -154,7 +158,11 @@ class MORPHSystem:
                 "outputs": result.outputs,
                 "error": result.error,
             }
-            self._transition(event_payload["kind"], context, event_payload)
+            caused_by = {
+                "decision_seq": decision_event.seq,
+                "effect_ids": [record.id for record in result.records],
+            }
+            self._transition(event_payload["kind"], context, event_payload, caused_by=caused_by)
         return result
 
     # --- transitions -----------------------------------------------------------------
@@ -162,7 +170,14 @@ class MORPHSystem:
     def _record_effect(self, record: EffectRecord) -> None:
         self.store.append(SYSTEM_STREAM, EFFECT, record.to_dict())
 
-    def _transition(self, kind: str, context: dict[str, Any], event_payload: dict[str, Any]) -> list[Event]:
+    def _transition(
+        self,
+        kind: str,
+        context: dict[str, Any],
+        event_payload: dict[str, Any],
+        *,
+        caused_by: dict[str, Any] | None = None,
+    ) -> list[Event]:
         fired: list[Event] = []
         for entity_type in self.schema.stateful_entities:
             for transition in entity_type.transitions_for(kind):
@@ -180,11 +195,10 @@ class MORPHSystem:
                         continue
                 if current == transition.to:
                     continue
-                event = self.store.append(
-                    stream_for(entity_type.name, entity_id),
-                    TRANSITIONED,
-                    {"entity": entity_type.name, "id": entity_id, "from": current, "to": transition.to, "on": kind},
-                )
+                transition_data = {"entity": entity_type.name, "id": entity_id, "from": current, "to": transition.to, "on": kind}
+                if caused_by is not None:
+                    transition_data["caused_by"] = caused_by
+                event = self.store.append(stream_for(entity_type.name, entity_id), TRANSITIONED, transition_data)
                 self._apply(event)
                 fired.append(event)
                 break  # one transition per entity instance per event
@@ -247,25 +261,52 @@ class MORPHSystem:
         events = provenance["events"]
         current = provenance["current_state"]
         narrative_parts: list[str] = [f"{entity} {entity_id} currently sits in state '{current.get('state', 'unknown')}'."]
+        causal: dict[str, Any] = {"transition": None, "decision": None, "effects": []}
 
         if not events:
             narrative_parts.append("There are no recorded events for this entity instance.")
             narrative = " ".join(narrative_parts)
-            return {"entity": entity, "id": entity_id, "current_state": current, "summary": narrative, "narrative": narrative, "events": events}
+            return {"entity": entity, "id": entity_id, "current_state": current, "summary": narrative, "narrative": narrative, "events": events, "causal": causal}
 
         transition = next((event for event in reversed(events) if event["kind"] == "transitioned"), None)
         if transition is not None:
             data = transition["data"]
+            causal["transition"] = transition
             narrative_parts.append(
                 f"The state transitioned from '{data.get('from')}' to '{data.get('to')}' on '{data.get('on')}', "
                 f"which is the most recent causal change in this event chain."
             )
+            cause_refs = data.get("caused_by") or {}
+            decision_seq = cause_refs.get("decision_seq")
+            if decision_seq is not None:
+                decision_event = next((event.to_dict() for event in self.store if event.seq == decision_seq), None)
+                causal["decision"] = decision_event
+            effect_ids = set(cause_refs.get("effect_ids") or [])
+            if effect_ids:
+                causal["effects"] = [
+                    event.to_dict()
+                    for event in self.store.events(stream=SYSTEM_STREAM, kinds=[EFFECT])
+                    if event.data.get("id") in effect_ids
+                ]
+
+            decision_data = (causal["decision"] or {}).get("data", {}).get("decision", {})
+            if decision_data:
+                narrative_parts.append(
+                    f"Policy '{decision_data.get('policy', 'unknown')}' selected "
+                    f"'{decision_data.get('status', 'unknown')}' action '{decision_data.get('action', 'unknown')}'."
+                )
+            for effect_event in causal["effects"]:
+                effect_data = effect_event["data"]
+                narrative_parts.append(
+                    f"Effect '{effect_data.get('action', 'unknown')}' "
+                    f"{effect_data.get('status', 'unknown')} through capability '{effect_data.get('capability', 'unknown')}'."
+                )
         else:
             narrative_parts.append("No transitioned state was observed, so the current state is driven by observation history alone.")
 
         narrative_parts.append(f"The causal chain includes {len(events)} recorded events, beginning with '{events[0]['kind']}' and ending with '{events[-1]['kind']}'.")
         narrative = " ".join(narrative_parts)
-        return {"entity": entity, "id": entity_id, "current_state": current, "summary": narrative, "narrative": narrative, "events": events}
+        return {"entity": entity, "id": entity_id, "current_state": current, "summary": narrative, "narrative": narrative, "events": events, "causal": causal}
 
     def explain_diff(self, entity: str, entity_id: str, *, omit_kinds: set[str] | None = None, omit_seq: int | None = None) -> dict[str, Any]:
         """Compare the actual entity state against the counterfactual path without selected event kinds."""

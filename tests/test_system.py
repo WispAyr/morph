@@ -140,7 +140,16 @@ def test_act_routes_records_events_and_advances_state():
     kinds = [event.kind for event in sys_.store]
     assert kinds == ["observed", "observed", "observed", "decided", "effect", "transitioned"]
     transitioned = sys_.history(kinds=["transitioned"])[0]["data"]
-    assert transitioned == {"entity": "destination", "id": "wall", "from": "idle", "to": "routed", "on": "route_source.succeeded"}
+    decision = sys_.history(kinds=["decided"])[0]
+    effect = sys_.history(kinds=["effect"])[0]
+    assert transitioned == {
+        "entity": "destination",
+        "id": "wall",
+        "from": "idle",
+        "to": "routed",
+        "on": "route_source.succeeded",
+        "caused_by": {"decision_seq": decision["seq"], "effect_ids": [effect["data"]["id"]]},
+    }
 
 
 def test_observation_driven_transitions_and_state_based_policy():
@@ -262,6 +271,14 @@ def test_system_can_explain_causal_history_in_plain_english():
     assert "transitioned" in explanation["summary"].lower()
     assert "routed" in explanation["current_state"]["state"]
     assert explanation["narrative"].startswith("destination")
+    causal = explanation["causal"]
+    decision = causal["decision"]["data"]["decision"]
+    effect = causal["effects"][0]["data"]
+    assert decision["policy"]
+    assert effect["action"] == decision["action"]
+    assert effect["status"] == "succeeded"
+    assert causal["transition"]["data"]["caused_by"]["decision_seq"] == causal["decision"]["seq"]
+    assert decision["policy"] in explanation["narrative"]
 
 
 def test_system_can_explain_causal_difference_between_actual_and_counterfactual_state():
@@ -315,6 +332,14 @@ def test_cli_system_commands(tmp_path, capsys):
 
     assert main(base + ["history", "--kind", "transitioned"]) == 0
     assert json.loads(capsys.readouterr().out)[0]["data"]["to"] == "routed"
+
+    assert main(base + ["explain", "destination", "wall"]) == 0
+    explanation = json.loads(capsys.readouterr().out)
+    assert explanation["entity"] == "destination"
+    assert "transitioned" in explanation["narrative"].lower()
+    assert "routed" in explanation["narrative"]
+    assert explanation["causal"]["decision"]["data"]["decision"]["policy"] in explanation["narrative"]
+    assert explanation["causal"]["effects"][0]["data"]["status"] == "succeeded"
 
     assert main(base + ["observe", "source", "cam1", "latency_ms=fast"]) == 1
     assert "latency_ms must be int" in capsys.readouterr().out

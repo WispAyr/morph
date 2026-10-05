@@ -148,6 +148,18 @@ morph system crosspoint.yaml --store events.jsonl history --kind transitioned
 - Compiled plans carry each policy's normalised CEL condition and the entity schema, so the Python and Node targets reach the same decision as the runtime. The SQL target only translates structured clause lists, emits one parameterised statement per policy, and refuses `contains`.
 - The semantic model also supports `intent` and `invariants`. `morph inspect` reports the system-level model, `morph simulate --context scenarios.yaml` checks invariants over example contexts, and `morph diff baseline.yaml candidate.yaml` reports `preserved`, `added`, and `blocked` invariants so an AI change can be reviewed before it is accepted.
 
+`SemanticReasoner` provides deterministic proofs for a deliberately limited typed CEL fragment: Boolean logic, scalar comparisons, and literal-list membership over declared `bool`, `int`, `double`, and `string` fields. For example, `x > 10` and `x >= 11` are equivalent when `x` is declared `int`, but not when it is `double`. Field presence is part of the reasoning model because MORPH allows declared context fields to be absent. Unsupported syntax, undeclared types, and external capability semantics return `relationship: unknown` with `confidence: unknown`; they are never treated as proof of safety. `MORPHIR.diff()` preserves a rewritten invariant only when equivalence is proven.
+
+```python
+from morph import SemanticReasoner
+
+result = SemanticReasoner().analyze(
+  "source.status == \"live\"",
+  "source.status in [\"live\"]",
+  types={"source.status": "string"},
+)
+```
+
 ```bash
 morph new my_service --template service
 cd my_service

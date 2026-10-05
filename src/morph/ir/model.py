@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from morph.expressions import compile_when
+from morph.expressions import when_to_cel
+from morph.reasoner import SemanticReasoner
 from morph.schema import Schema
 
 
@@ -364,9 +366,90 @@ class MORPHIR:
         }
         return left == right
 
+    @staticmethod
+    def _shared_semantic_types(left: "MORPHIR", right: "MORPHIR") -> dict[str, str]:
+        def field_types(model: "MORPHIR") -> dict[str, str]:
+            schema = Schema.from_ir(model.entities)
+            return {
+                f"{entity_name}.{field_name}": field_type
+                for entity_name, entity in schema.entities.items()
+                for field_name, field_type in entity.fields.items()
+            }
+
+        left_types = field_types(left)
+        right_types = field_types(right)
+        return {path: field_type for path, field_type in left_types.items() if right_types.get(path) == field_type}
+
+    @staticmethod
+    def _invariant_condition(invariants: list[dict[str, Any]]) -> str:
+        conditions = [when_to_cel(item.get("when")) for item in invariants if isinstance(item, dict)]
+        return " && ".join(f"({condition})" for condition in conditions) if conditions else "true"
+
+    def classify_equivalence(self, candidate: "MORPHIR | dict[str, Any]") -> str:
+        """Return a pragmatic semantic equivalence classification.
+
+        The classification is intentionally conservative and designed for AI review, not a
+        full theorem prover. It distinguishes identical, equivalent, narrower, broader,
+        conflicting, and unknown cases using explicit invariant conditions.
+        """
+        if not isinstance(candidate, MORPHIR):
+            candidate = MORPHIR.from_dict(candidate)
+
+        if self.equivalent_to(candidate):
+            return "IDENTICAL"
+
+        if not self.invariants and not candidate.invariants:
+            return "IDENTICAL"
+        analysis = SemanticReasoner().analyze(
+            self._invariant_condition(self.invariants),
+            self._invariant_condition(candidate.invariants),
+            types=self._shared_semantic_types(self, candidate),
+        )
+        if analysis["confidence"] != "proven":
+            return "UNKNOWN"
+        return analysis["relationship"].upper()
+
     def semantic_equivalence(self, candidate: "MORPHIR | dict[str, Any]") -> bool:
         """Alias for equivalent_to()."""
         return self.equivalent_to(candidate)
+
+    def propose(self, candidate: "MORPHIR | dict[str, Any]", *, intent: str | None = None) -> dict[str, Any]:
+        """Return an AI-facing semantic proposal object for a candidate evolution."""
+        if not isinstance(candidate, MORPHIR):
+            candidate = MORPHIR.from_dict(candidate)
+
+        diff = self.diff(candidate)
+        classification = self.classify_equivalence(candidate)
+        impact_subjects = sorted(set(self.impact("*").get("subjects", []) if False else []))
+        _ = impact_subjects
+
+        status = "safe_to_review"
+        if diff["blocked"]:
+            status = "blocked"
+        elif classification in {"CONFLICTING", "UNKNOWN"}:
+            status = "needs_review"
+
+        proposal = {
+            "proposal": {
+                "intent": intent or self.intent.get("summary") or "semantic change proposal",
+                "changes": [
+                    {"kind": "model", "from": self.name, "to": candidate.name},
+                    {"kind": "version", "from": self.version, "to": candidate.version},
+                ],
+            },
+            "impact": {
+                "entities": sorted(set([entity.get("name") for entity in self.entities if isinstance(entity, dict) and entity.get("name")] + [entity.get("name") for entity in candidate.entities if isinstance(entity, dict) and entity.get("name")])),
+                "policies": sorted(set(policy.get("name") for policy in self.policies if isinstance(policy, dict) and policy.get("name")) | set(policy.get("name") for policy in candidate.policies if isinstance(policy, dict) and policy.get("name"))),
+                "capabilities": sorted(set((self.capabilities or {}).keys()) | set((candidate.capabilities or {}).keys())),
+                "actions": sorted(set((self.actions or {}).keys()) | set((candidate.actions or {}).keys())),
+            },
+            "equivalence": classification,
+            "invariants": diff,
+            "simulation": {"scenarios": 0, "passed": 0, "failed": 0},
+            "status": status,
+        }
+        proposal["changes"] = proposal["proposal"]["changes"]
+        return proposal
 
     def diff(self, candidate: "MORPHIR | dict[str, Any]") -> dict[str, Any]:
         """Summarize how a candidate semantic model changes the current one.
@@ -389,7 +472,12 @@ class MORPHIR:
             if name not in next_map:
                 blocked.append(name)
                 continue
-            if when == next_map[name]:
+            analysis = SemanticReasoner().analyze(
+                when,
+                next_map[name],
+                types=self._shared_semantic_types(self, candidate),
+            )
+            if analysis["relationship"] == "equivalent" and analysis["confidence"] == "proven":
                 preserved.append(name)
             else:
                 blocked.append(name)

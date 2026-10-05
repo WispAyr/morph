@@ -347,3 +347,103 @@ def test_morph_ir_can_map_semantics_and_compute_impact():
 
     equivalent = system.equivalent_to(system)
     assert equivalent is True
+
+
+def test_morph_ir_can_classify_semantic_equivalence_and_emit_a_proposal():
+    from morph import MORPHIR
+
+    baseline = MORPHIR.from_dict(
+        {
+            "name": "studio",
+            "version": "0.9.0",
+            "entities": [{"name": "source", "fields": {"status": "string", "latency_ms": "int"}}],
+            "invariants": [{"name": "live_route", "when": 'source.status == "live" && source.latency_ms < 120'}],
+            "policies": [{"name": "allow_live", "when": 'source.status == "live" && source.latency_ms < 120', "result": {"status": "allow", "action": "ok"}}],
+        }
+    )
+
+    equivalent = MORPHIR.from_dict(
+        {
+            "name": "studio",
+            "version": "0.9.0",
+            "entities": [{"name": "source", "fields": {"status": "string", "latency_ms": "int"}}],
+            "invariants": [{"name": "live_route", "when": 'source.latency_ms < 120 && source.status == "live"'}],
+            "policies": [{"name": "allow_live", "when": 'source.latency_ms < 120 && source.status == "live"', "result": {"status": "allow", "action": "ok"}}],
+        }
+    )
+    broader = MORPHIR.from_dict(
+        {
+            "name": "studio",
+            "version": "0.9.1",
+            "entities": [{"name": "source", "fields": {"status": "string", "latency_ms": "int"}}],
+            "invariants": [{"name": "live_route", "when": 'source.status == "live" || source.status == "ready"'}],
+        }
+    )
+    conflicting = MORPHIR.from_dict(
+        {
+            "name": "studio",
+            "version": "0.9.2",
+            "entities": [{"name": "source", "fields": {"status": "string", "latency_ms": "int"}}],
+            "invariants": [{"name": "live_route", "when": 'source.status == "faulted"'}],
+        }
+    )
+
+    assert baseline.classify_equivalence(equivalent) == "EQUIVALENT"
+    assert baseline.classify_equivalence(broader) == "BROADER"
+    assert baseline.classify_equivalence(conflicting) == "CONFLICTING"
+    assert baseline.diff(equivalent) == {"preserved": ["live_route"], "added": [], "blocked": []}
+    assert baseline.plan_change(equivalent)["status"] == "safe"
+
+    proposal = baseline.propose({
+        "name": "studio",
+        "version": "0.9.1",
+        "entities": [{"name": "source", "fields": {"status": "string", "latency_ms": "int"}}],
+        "invariants": [{"name": "live_route", "when": 'source.status == "live" && source.latency_ms < 120'}],
+        "policies": [{"name": "allow_live", "when": 'source.status == "live" && source.latency_ms < 120', "result": {"status": "allow", "action": "ok"}}],
+    })
+
+    assert proposal["status"] == "safe_to_review"
+    assert proposal["equivalence"] == "IDENTICAL"
+    assert proposal["changes"]
+
+
+def test_semantic_reasoner_proves_typed_relationships_and_preserves_unknown():
+    from morph import MORPHIR, SemanticReasoner
+
+    reasoner = SemanticReasoner()
+    types = {"a": "bool", "b": "bool", "x": "int", "floating": "double", "source.status": "string"}
+
+    commutative = reasoner.analyze("a && b", "b && a", types=types)
+    integer_boundary = reasoner.analyze("x > 10", "x >= 11", types=types)
+    floating_boundary = reasoner.analyze("floating > 10", "floating >= 11", types=types)
+    membership = reasoner.analyze('source.status == "live"', 'source.status in ["live"]', types=types)
+    conflict = reasoner.analyze('source.status == "live"', 'source.status == "ready"', types=types)
+    narrower = reasoner.analyze("x > 10", "x > 20", types=types)
+    optional_field = reasoner.analyze("a", "a && (b || !b)", types=types)
+    unknown = reasoner.analyze("external.check(source.status)", 'source.status == "live"', types=types)
+
+    assert commutative["relationship"] == "equivalent"
+    assert commutative["confidence"] == "proven"
+    assert integer_boundary["relationship"] == "equivalent"
+    assert integer_boundary["confidence"] == "proven"
+    assert floating_boundary["relationship"] == "narrower"
+    assert membership["relationship"] == "equivalent"
+    assert conflict["relationship"] == "conflicting"
+    assert conflict["confidence"] == "proven"
+    assert narrower["relationship"] == "narrower"
+    assert narrower["confidence"] == "proven"
+    assert optional_field["relationship"] == "narrower"
+    assert optional_field["confidence"] == "proven"
+    assert unknown["relationship"] == "unknown"
+    assert unknown["confidence"] == "unknown"
+    assert unknown["reason"]
+
+    integer_baseline = MORPHIR.from_dict({
+        "entities": [{"name": "session", "fields": {"minutes": "int"}}],
+        "invariants": [{"name": "grace", "when": "session.minutes > 10"}],
+    })
+    integer_candidate = MORPHIR.from_dict({
+        "entities": [{"name": "session", "fields": {"minutes": "int"}}],
+        "invariants": [{"name": "grace", "when": "session.minutes >= 11"}],
+    })
+    assert integer_baseline.diff(integer_candidate) == {"preserved": ["grace"], "added": [], "blocked": []}

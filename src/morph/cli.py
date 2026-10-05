@@ -75,6 +75,12 @@ def _build_parser() -> argparse.ArgumentParser:
     diff_parser.add_argument("candidate", help="Path to the proposed updated MORPH YAML file.")
     diff_parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output.")
 
+    propose_parser = subparsers.add_parser("propose", help="Generate an AI-facing semantic proposal for a candidate mutation.")
+    propose_parser.add_argument("baseline", help="Path to the original MORPH YAML file.")
+    propose_parser.add_argument("candidate", help="Path to the proposed updated MORPH YAML file.")
+    propose_parser.add_argument("--intent", help="Short human description of the change being proposed.")
+    propose_parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output.")
+
     impact_parser = subparsers.add_parser("impact", help="Explain what a semantic subject depends on and what it affects.")
     impact_parser.add_argument("source", help="Path to the MORPH YAML file to inspect.")
     impact_parser.add_argument("subject", help="Semantic subject or field path, for example ParkingSession.status.")
@@ -357,6 +363,18 @@ def _cmd_plan(baseline: str, candidate: str, pretty: bool) -> int:
         return 1
 
 
+def _cmd_propose(baseline: str, candidate: str, intent: str | None, pretty: bool) -> int:
+    try:
+        base_ir = load_system_definition(Path(baseline))
+        cand_ir = load_system_definition(Path(candidate))
+        proposal = base_ir.propose(cand_ir, intent=intent)
+        print(json.dumps(proposal, indent=2 if pretty else None))
+        return 1 if proposal["status"] in {"blocked", "needs_review"} else 0
+    except (OSError, ValueError, TypeError, yaml.YAMLError) as exc:
+        print(f"error: {exc}")
+        return 1
+
+
 def _cmd_impact(source: str, subject: str, pretty: bool) -> int:
     try:
         definition = load_system_definition(Path(source))
@@ -469,6 +487,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "diff":
         return _cmd_diff(args.baseline, args.candidate, args.pretty)
+
+    if args.command == "propose":
+        return _cmd_propose(args.baseline, args.candidate, args.intent, args.pretty)
 
     if args.command in {"plan", "review"}:
         return _cmd_plan(args.baseline, args.candidate, args.pretty)
