@@ -15,14 +15,19 @@ def _run(arm, *, affected, relationship="broader", tests_passed=True):
         "arm": arm,
         "agent": {"provider": "test", "model": "same-agent", "version": "1"},
         "analysis": {"affected_subjects": affected, "relationship": relationship},
-        "judge": {
-            "implementation_complete": True,
-            "tests_passed": tests_passed,
-            "simulation_passed": True,
-            "invariants_status": "not_applicable",
-        },
         "human_interventions": 0,
         "elapsed_seconds": 30,
+    }
+
+
+def _evaluation(arm, *, pair_id="pilot-1", tests_passed=True):
+    return {
+        "pair_id": pair_id,
+        "arm": arm,
+        "implementation_complete": True,
+        "tests_passed": tests_passed,
+        "simulation_passed": True,
+        "invariants_status": "not_applicable",
     }
 
 
@@ -33,7 +38,7 @@ def test_score_runs_compares_a_paired_task_by_arm():
         _run("morph_mediated", affected=expected),
     ]
 
-    result = score_runs(runs, {"tasks": {"pilot": {"affected_subjects": expected, "relationship": "broader"}}})
+    result = score_runs(runs, {"tasks": {"pilot": {"affected_subjects": expected, "relationship": "broader"}}}, [_evaluation("direct_source", tests_passed=False), _evaluation("morph_mediated")])
 
     assert result["by_arm"]["morph_mediated"]["impact_f1_rate"] == 1.0
     assert result["by_arm"]["direct_source"]["impact_recall_rate"] == pytest.approx(2 / 3)
@@ -45,7 +50,7 @@ def test_score_runs_compares_a_paired_task_by_arm():
 def test_score_runs_rejects_incomplete_pairs():
     run = _run("morph_mediated", affected=[])
     with pytest.raises(ValueError, match="one run for each arm"):
-        score_runs([run], {"tasks": {"pilot": {"affected_subjects": [], "relationship": "broader"}}})
+        score_runs([run], {"tasks": {"pilot": {"affected_subjects": [], "relationship": "broader"}}}, [_evaluation("morph_mediated")])
 
 
 def test_score_runs_rejects_mismatched_models_in_a_pair():
@@ -53,7 +58,7 @@ def test_score_runs_rejects_mismatched_models_in_a_pair():
     morph = _run("morph_mediated", affected=[])
     morph["agent"]["model"] = "different-agent"
     with pytest.raises(ValueError, match="same provider and model version"):
-        score_runs([direct, morph], {"tasks": {"pilot": {"affected_subjects": [], "relationship": "broader"}}})
+        score_runs([direct, morph], {"tasks": {"pilot": {"affected_subjects": [], "relationship": "broader"}}}, [_evaluation("direct_source"), _evaluation("morph_mediated")])
 
 
 def test_score_runs_flags_unknown_relationship_overclaim():
@@ -61,7 +66,7 @@ def test_score_runs_flags_unknown_relationship_overclaim():
     morph = _run("morph_mediated", affected=[], relationship="unknown")
     reference = {"tasks": {"pilot": {"affected_subjects": [], "relationship": "unknown"}}}
 
-    result = score_runs([direct, morph], reference)
+    result = score_runs([direct, morph], reference, [_evaluation("direct_source"), _evaluation("morph_mediated")])
 
     assert result["by_arm"]["direct_source"]["unknown_overclaims"] == 1
     assert result["by_arm"]["morph_mediated"]["unknown_overclaims"] == 0
