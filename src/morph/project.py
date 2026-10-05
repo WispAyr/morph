@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -10,6 +11,16 @@ class ProjectTemplate:
     name: str
     description: str
     builder: Callable[[str, Path], None]
+
+
+def package_name_for(project_name: str) -> str:
+    """Turn a directory name into a valid Python package name."""
+    name = re.sub(r"\W+", "_", project_name).strip("_").lower()
+    if not name:
+        name = "service"
+    if name[0].isdigit():
+        name = f"_{name}"
+    return name
 
 
 class ProjectScaffold:
@@ -41,30 +52,81 @@ class ProjectScaffold:
 
 
 def _service_template_builder(project_name: str, project_dir: Path) -> None:
+    package = package_name_for(project_name)
     src_dir = project_dir / "src"
-    package_dir = src_dir / project_name
+    package_dir = src_dir / package
     package_dir.mkdir(parents=True)
 
     (project_dir / "morph.yaml").write_text(
-        f"""name: {project_name}
+        f"""name: {package}
 version: 0.1.0
+
+entities:
+  - name: system
+    fields:
+      status: string
+      load: double
+
+# Capabilities are the only path to side effects. Adapters implement them in code.
+capabilities:
+  request_handler:
+    requires: []
+    inputs: {{status: string}}
+    outputs: {{handled: bool}}
+
+actions:
+  handle_request:
+    capability: request_handler
+    inputs:
+      status: system.status
+
 policies:
+  - name: shed_load
+    when: has(system.load) && system.load > 0.9
+    result:
+      status: deny
+      action: raise_alert
   - name: default_control
-    when:
-      - field: system.status
-        equals: ready
+    when: system.status == "ready"
     result:
       status: allow
       action: handle_request
+
 workflow:
   steps:
     - name: route_request
-      when:
-        - field: system.status
-          equals: ready
+      when: system.status == "ready"
       then:
         action: handle_request
-""".strip() + "\n",
+""",
+        encoding="utf-8",
+    )
+
+    (project_dir / "pyproject.toml").write_text(
+        f"""[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "{package}"
+version = "0.1.0"
+description = "MORPH service generated from the 'service' template"
+requires-python = ">=3.11"
+dependencies = [
+  "morph",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+""",
         encoding="utf-8",
     )
 
@@ -77,26 +139,93 @@ MORPH project scaffold generated with the `service` template.
 
 ```bash
 python -m pip install -e .[dev]
+pytest -q
+morph validate morph.yaml
+morph run morph.yaml --set system.status=ready
+morph run morph.yaml --set system.status=ready --set system.load=0.95 --explain
+morph run morph.yaml --set system.status=ready --adapters {package}:ADAPTERS
 morph compile morph.yaml --target node
 ```
 """,
         encoding="utf-8",
     )
 
-    (src_dir / "__init__.py").write_text("\n", encoding="utf-8")
+    (project_dir / ".gitignore").write_text("__pycache__/\n.pytest_cache/\n.venv/\n*.pyc\n*.egg-info/\n", encoding="utf-8")
+
     (package_dir / "__init__.py").write_text(
-        """\"\"\"Generated MORPH service package.\"\"\"\n\n__all__ = [\"runtime\"]\n""",
+        '"""Generated MORPH service package."""\n\nfrom .adapters import ADAPTERS\nfrom .runtime import ServiceRuntime\n\n__all__ = ["ADAPTERS", "ServiceRuntime"]\n',
+        encoding="utf-8",
+    )
+
+    (package_dir / "adapters.py").write_text(
+        '''"""Adapters implement this service's capabilities. They are the only code that performs effects."""
+
+from __future__ import annotations
+
+from typing import Any
+
+
+def handle_request(inputs: dict[str, Any]) -> dict[str, Any]:
+    # Replace with the real side effect. Raise morph.EffectFailure for declared failure modes.
+    return {"handled": inputs["status"] == "ready"}
+
+
+ADAPTERS = {"request_handler": handle_request}
+''',
         encoding="utf-8",
     )
 
     (package_dir / "runtime.py").write_text(
-        """from __future__ import annotations\n\nfrom morph import MORPHRuntime\n\n\nclass ServiceRuntime(MORPHRuntime):\n    \"\"\"A typed runtime adapter for this generated MORPH service.\"\"\"\n\n    def __init__(self, definition):\n        super().__init__(\n            name=definition.get('name', 'service'),\n            version=definition.get('version', '0.1.0'),\n            policies=definition.get('policies', []),\n            capabilities=definition.get('capabilities', {}),\n        )\n""",
+        '''from __future__ import annotations
+
+from pathlib import Path
+
+from morph import MORPHRuntime, load_system_definition
+
+DEFINITION_PATH = Path(__file__).resolve().parents[2] / "morph.yaml"
+
+
+class ServiceRuntime(MORPHRuntime):
+    """A typed runtime adapter for this generated MORPH service."""
+
+    @classmethod
+    def load(cls, path: Path = DEFINITION_PATH) -> "ServiceRuntime":
+        definition = load_system_definition(path)
+        return cls(
+            name=definition.name,
+            version=definition.version,
+            policies=definition.policies,
+            capabilities=definition.capabilities,
+            entities=definition.entities,
+            actions=definition.actions,
+        )
+''',
         encoding="utf-8",
     )
 
     (project_dir / "tests").mkdir()
     (project_dir / "tests" / "test_runtime.py").write_text(
-        """from pathlib import Path\n\nfrom morph import load_system_definition\n\n\ndef test_generated_definition_loads() -> None:\n    definition = load_system_definition(Path(__file__).resolve().parents[1] / 'morph.yaml')\n    assert definition.name\n    assert definition.policies\n""",
+        f'''from morph import EffectExecutor
+
+from {package} import ADAPTERS, ServiceRuntime
+
+
+def test_generated_definition_allows_ready_system() -> None:
+    runtime = ServiceRuntime.load()
+
+    assert runtime.evaluate({{"system": {{"status": "ready"}}}})["status"] == "allow"
+    assert runtime.evaluate({{"system": {{"status": "down"}}}})["status"] == "deny"
+    assert runtime.evaluate({{"system": {{"status": "ready", "load": 0.95}}}})["policy"] == "shed_load"
+
+
+def test_generated_effect_runs_through_the_adapter() -> None:
+    executor = EffectExecutor(ServiceRuntime.load(), ADAPTERS)
+
+    result = executor.run({{"system": {{"status": "ready"}}}})
+
+    assert result.status == "executed"
+    assert result.outputs == {{"handled": True}}
+''',
         encoding="utf-8",
     )
 

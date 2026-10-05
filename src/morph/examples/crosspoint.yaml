@@ -1,0 +1,61 @@
+name: crosspoint
+version: 0.4.0
+description: Studio control plane. Decides route changes and executes them through the router.
+
+entities:
+  - name: source
+    fields: {id: string, status: string, latency_ms: int}
+  - name: destination
+    fields: {id: string, status: string, latency_ms: int, source: string}
+    states: [idle, routed, faulted]
+    initial: idle
+    transitions:
+      - {on: route_source.succeeded, from: "*", to: routed}
+      - {on: observed, from: "*", to: faulted, when: 'has(event.fields.status) && event.fields.status == "faulted"'}
+      - {on: observed, from: faulted, to: idle, when: 'has(event.fields.status) && event.fields.status == "ready"'}
+  - name: route
+    fields: {locked: bool, locked_by: string}
+  - name: operator
+    fields: {id: string, capabilities: list}
+
+capabilities:
+  route_control:
+    description: Change which source feeds a destination on the studio router.
+    requires: [operator.capabilities]
+    inputs: {source: string, destination: string, operator: string}
+    outputs: {route_id: string, previous_source: string}
+    failures: [destination_locked, router_busy]
+    idempotency: [source, destination]
+    retries: 2
+  notify:
+    description: Tell the operator why something was blocked.
+    requires: []
+    inputs: {operator: string, message: string}
+    outputs: {}
+
+actions:
+  route_source:
+    capability: route_control
+    inputs:
+      source: source.id
+      destination: destination.id
+      operator: operator.id
+  raise_alert:
+    capability: notify
+    inputs:
+      operator: operator.id
+      message: '"route " + source.id + " -> " + destination.id + " blocked"'
+
+policies:
+  - name: deny_faulted_destination
+    when: destination.state == "faulted"
+    result: {status: deny, action: raise_alert}
+  - name: deny_locked_route
+    when: has(route.locked) && route.locked && (!has(route.locked_by) || route.locked_by != operator.id)
+    result: {status: deny, action: raise_alert}
+  - name: allow_live_route
+    requires: [route_control]
+    when: >-
+      source.status == "live" && destination.status == "ready"
+      && source.latency_ms < 120 && destination.latency_ms < 120
+    result: {status: allow, action: route_source}

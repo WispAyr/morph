@@ -12,6 +12,7 @@ class MORPHIR:
     entities: list[dict[str, Any]] = field(default_factory=list)
     policies: list[dict[str, Any]] = field(default_factory=list)
     capabilities: dict[str, Any] = field(default_factory=dict)
+    actions: dict[str, Any] = field(default_factory=dict)
     workflow: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -25,6 +26,7 @@ class MORPHIR:
             entities=data.get("entities", []),
             policies=data.get("policies", []),
             capabilities=data.get("capabilities", {}),
+            actions=data.get("actions", {}),
             workflow=data.get("workflow", {}),
         )
 
@@ -39,5 +41,6 @@ class MORPHIR:
             "entities": self.entities,
             "policies": self.policies,
             "capabilities": self.capabilities,
+            "actions": self.actions,
             "workflow": self.workflow,
         }

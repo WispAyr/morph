@@ -2,11 +2,38 @@ from __future__ import annotations
 
 from typing import Any
 
-from .runtime import MORPHRuntime
+from .runtime import DENY_ACTION, MORPHRuntime
+
+# Operators the SQL target can express as a WHERE clause.
+_SQL_OPERATORS = {"equals": "=", "lt": "<", "lte": "<=", "gt": ">", "gte": ">="}
+
+
+def _sql_literal(value: Any) -> str:
+    """Render a Python value as a safe SQL literal."""
+    if value is None:
+        return "NULL"
+    if isinstance(value, bool):
+        return "TRUE" if value else "FALSE"
+    if isinstance(value, (int, float)):
+        return repr(value)
+    text = str(value).replace("'", "''")
+    return f"'{text}'"
+
+
+def _sql_column(field: str) -> str:
+    """Map a dotted context path to a column name, rejecting anything non-identifier."""
+    column = field.replace(".", "_")
+    if not column.replace("_", "").isalnum() or column[0].isdigit():
+        raise ValueError(f"Field '{field}' cannot be expressed as a SQL column name.")
+    return column
 
 
 class Compiler:
-    """Compile a MORPH definition into an executable target plan."""
+    """Compile a MORPH definition into an executable target plan.
+
+    The compiled plan keeps each policy's conditions and capability requirements, so a
+    target can evaluate the plan against a context with exactly the runtime's semantics.
+    """
 
     _TARGET_REGISTRY: dict[str, type[Any]] = {}
 
@@ -27,119 +54,148 @@ class Compiler:
 
     @staticmethod
     def compile(ir: dict[str, Any], target: str = "python") -> dict[str, Any]:
+        if target not in Compiler._TARGET_REGISTRY:
+            raise ValueError(f"Unknown target '{target}'. Registered targets: {sorted(Compiler._TARGET_REGISTRY)}")
+
+        # Constructing the runtime validates the policies and schema before anything is emitted.
         runtime = MORPHRuntime(
             name=ir.get("name", "morph"),
             version=ir.get("version", "0.1.0"),
             policies=ir.get("policies", []),
             capabilities=ir.get("capabilities", {}),
+            entities=ir.get("entities"),
+            actions=ir.get("actions"),
         )
 
         actions = []
-        for policy in runtime.policies:
+        for policy, predicate in zip(runtime.policies, runtime._predicates):
+            result = policy.get("result", {})
             actions.append({
                 "name": policy.get("name", "unknown"),
-                "action": policy.get("result", {}).get("action", "raise_alert"),
-                "status": policy.get("result", {}).get("status", "deny"),
+                "action": result.get("action", DENY_ACTION),
+                "status": result.get("status", "deny"),
                 "requires": policy.get("requires", []),
+                # The normalised CEL form is what targets evaluate; it is language-neutral.
+                "when": predicate.source,
             })
 
-        compiled = {
+        compiled: dict[str, Any] = {
             "target": target,
             "name": runtime.name,
             "version": runtime.version,
+            "entities": runtime.schema.to_dict(),
+            "capabilities": {name: spec.to_dict() for name, spec in runtime.capability_specs.items()},
+            "actions": {name: spec.to_dict() for name, spec in runtime.action_specs.items()},
             "plan": actions,
         }
 
         if target == "sql":
-            conditions = []
-            for policy in runtime.policies:
-                for clause in policy.get("when", []):
-                    field = clause.get("field", "")
-                    if "equals" in clause:
-                        conditions.append(f"{field} = '{clause['equals']}'")
-            compiled["sql"] = "SELECT '" + actions[0]["action"] + "' AS action WHERE " + " AND ".join(conditions) + ";" if conditions else "SELECT '" + actions[0]["action"] + "' AS action;"
-
-        if target not in Compiler._TARGET_REGISTRY:
-            raise ValueError(f"Unknown target '{target}'. Registered targets: {sorted(Compiler._TARGET_REGISTRY)}")
+            statements = [Compiler._compile_sql_statement(policy) for policy in runtime.policies]
+            compiled["statements"] = statements
+            compiled["sql"] = "\n".join(statement["sql"] for statement in statements)
 
         return compiled
 
+    @staticmethod
+    def _compile_sql_statement(policy: dict[str, Any]) -> dict[str, Any]:
+        """Render one policy as a parameterised SELECT plus a readable literal form."""
+        result = policy.get("result", {})
+        status = result.get("status", "deny")
+        action = result.get("action", DENY_ACTION)
 
-class PythonTarget:
-    """A Python execution target for compiled MORPH plans."""
+        when = policy.get("when", [])
+        if not isinstance(when, list) or not all(isinstance(clause, dict) for clause in when):
+            raise ValueError(
+                f"Policy '{policy.get('name', 'unknown')}' uses a CEL expression; the SQL target "
+                "can only translate structured clause lists."
+            )
+
+        clauses: list[str] = []
+        literal_clauses: list[str] = []
+        params: list[Any] = []
+        for clause in when:
+            column = _sql_column(clause["field"])
+            for operator, symbol in _SQL_OPERATORS.items():
+                if operator in clause:
+                    clauses.append(f"{column} {symbol} ?")
+                    literal_clauses.append(f"{column} {symbol} {_sql_literal(clause[operator])}")
+                    params.append(clause[operator])
+            if "contains" in clause:
+                raise ValueError(
+                    f"Policy '{policy.get('name', 'unknown')}' uses 'contains' on '{clause['field']}', "
+                    "which the SQL target cannot express."
+                )
+
+        select = f"SELECT {_sql_literal(status)} AS status, {_sql_literal(action)} AS action"
+        where = f" WHERE {' AND '.join(literal_clauses)}" if literal_clauses else ""
+        where_params = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+
+        return {
+            "policy": policy.get("name", "unknown"),
+            "sql": f"{select}{where};",
+            "parameterized_sql": f"{select}{where_params};",
+            "params": params,
+        }
+
+
+def _runtime_from_plan(compiled: dict[str, Any]) -> MORPHRuntime:
+    return MORPHRuntime(
+        name=compiled.get("name", "morph"),
+        version=compiled.get("version", "0.1.0"),
+        policies=[
+            {
+                "name": entry.get("name", "unknown"),
+                "requires": entry.get("requires", []),
+                "when": entry.get("when", []),
+                "result": {"status": entry.get("status", "deny"), "action": entry.get("action", DENY_ACTION)},
+            }
+            for entry in compiled.get("plan", [])
+        ],
+        capabilities=compiled.get("capabilities", {}),
+        entities=compiled.get("entities"),
+        actions=compiled.get("actions"),
+    )
+
+
+class _PlanTarget:
+    """Shared executor: evaluates a compiled plan with the runtime's semantics."""
 
     def __init__(self, compiled: dict[str, Any]):
         self.compiled = compiled
-        self.runtime = MORPHRuntime(
-            name=compiled.get("name", "morph"),
-            version=compiled.get("version", "0.1.0"),
-            policies=[
-                {
-                    "name": action["name"],
-                    "requires": action.get("requires", []),
-                    "when": [{"field": "_compiled", "equals": True}],
-                    "result": {"status": action["status"], "action": action["action"]},
-                }
-                for action in compiled.get("plan", [])
-            ],
-        )
+        self.runtime = _runtime_from_plan(compiled)
 
     def execute(self, context: dict[str, Any]) -> dict[str, Any]:
-        augmented = dict(context)
-        augmented["_compiled"] = True
-        decision = self.runtime.evaluate(augmented)
+        decision = self.runtime.evaluate(context)
         return {
             "status": decision.get("status", "deny"),
-            "action": decision.get("action", "raise_alert"),
+            "action": decision.get("action", DENY_ACTION),
+            "policy": decision.get("policy"),
             "name": self.compiled.get("name", "morph"),
             "version": self.compiled.get("version", "0.1.0"),
         }
 
 
-class NodeTarget:
-    """A JavaScript/Node-compatible execution target for compiled MORPH plans."""
-
-    def __init__(self, compiled: dict[str, Any]):
-        self.compiled = compiled
-
-    def execute(self, context: dict[str, Any]) -> dict[str, Any]:
-        for action in self.compiled.get("plan", []):
-            if action.get("status") == "allow":
-                return {
-                    "status": "allow",
-                    "action": action.get("action", "route_source"),
-                    "name": self.compiled.get("name", "morph"),
-                    "version": self.compiled.get("version", "0.1.0"),
-                }
-        return {
-            "status": "deny",
-            "action": "raise_alert",
-            "name": self.compiled.get("name", "morph"),
-            "version": self.compiled.get("version", "0.1.0"),
-        }
+class PythonTarget(_PlanTarget):
+    """A Python execution target for compiled MORPH plans."""
 
 
-class SQLTarget:
-    """A SQL execution target for compiled MORPH plans."""
+class NodeTarget(_PlanTarget):
+    """A JavaScript/Node-compatible plan target.
 
-    def __init__(self, compiled: dict[str, Any]):
-        self.compiled = compiled
+    The compiled plan is plain JSON that a Node runtime can evaluate with the same
+    condition semantics; this class executes it in-process as the reference.
+    """
 
-    def execute(self, context: dict[str, Any]) -> dict[str, Any]:
-        sql = self.compiled.get("sql", "")
-        if "route_source" in sql or "allow" in sql.lower():
-            return {
-                "status": "allow",
-                "action": "route_source",
-                "name": self.compiled.get("name", "morph"),
-                "version": self.compiled.get("version", "0.1.0"),
-            }
-        return {
-            "status": "deny",
-            "action": "raise_alert",
-            "name": self.compiled.get("name", "morph"),
-            "version": self.compiled.get("version", "0.1.0"),
-        }
+
+class SQLTarget(_PlanTarget):
+    """A SQL target for compiled MORPH plans.
+
+    ``compiled["statements"]`` carries one parameterised SELECT per policy for an external
+    database engine. ``execute`` runs the plan in-process as the reference evaluator.
+    """
+
+    def statements(self) -> list[dict[str, Any]]:
+        return list(self.compiled.get("statements", []))
 
 
 Compiler.register_target("python", PythonTarget)
