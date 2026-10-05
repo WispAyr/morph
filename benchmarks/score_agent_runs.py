@@ -62,13 +62,28 @@ def _impact_scores(predicted: set[str], expected: set[str]) -> tuple[float, floa
     return precision, recall, f1
 
 
-def score_runs(runs: list[dict[str, Any]], reference: dict[str, Any]) -> dict[str, Any]:
+def score_runs(runs: list[dict[str, Any]], reference: dict[str, Any], evaluations: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     tasks = reference.get("tasks")
     if not isinstance(tasks, dict) or not tasks:
         raise ValueError("reference.tasks must be a non-empty object keyed by task_id")
 
     evaluated: list[dict[str, Any]] = []
     pair_arms: dict[str, dict[str, dict[str, Any]]] = {}
+    evaluation_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+    for index, evaluation in enumerate(evaluations or []):
+        if not isinstance(evaluation, dict):
+            raise ValueError(f"evaluations[{index}] must be an object")
+        key = (evaluation.get("pair_id"), evaluation.get("arm"))
+        if not all(isinstance(value, str) and value for value in key):
+            raise ValueError(f"evaluations[{index}] must declare pair_id and arm")
+        if key in evaluation_by_key:
+            raise ValueError(f"duplicate evaluation for {key[0]} / {key[1]}")
+        for field in ("implementation_complete", "tests_passed", "simulation_passed"):
+            if not isinstance(evaluation.get(field), bool):
+                raise ValueError(f"evaluations[{index}].{field} must be Boolean")
+        if evaluation.get("invariants_status") not in INVARIANT_STATUSES:
+            raise ValueError(f"evaluations[{index}].invariants_status is invalid")
+        evaluation_by_key[key] = evaluation
     for index, run in enumerate(runs):
         _validate_run(run, index)
         task_id = run["task_id"]
