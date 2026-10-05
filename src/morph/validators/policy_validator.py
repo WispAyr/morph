@@ -78,12 +78,20 @@ class PolicyValidator:
         else:
             if "status" not in policy["result"]:
                 errors.append("policy.result.status is required")
+            elif not isinstance(policy["result"]["status"], str) or policy["result"]["status"] not in {"allow", "deny"}:
+                errors.append("policy.result.status must be 'allow' or 'deny'")
             if "action" not in policy["result"]:
                 errors.append("policy.result.action is required")
+            elif not isinstance(policy["result"]["action"], str) or not policy["result"]["action"]:
+                errors.append("policy.result.action must be a non-empty string")
 
         requires = policy.get("requires")
         if requires is not None and not isinstance(requires, (str, list)):
             errors.append("policy.requires must be a string or a list of capability names")
+        elif isinstance(requires, str) and not requires:
+            errors.append("policy.requires must contain non-empty capability names")
+        elif isinstance(requires, list) and not all(isinstance(item, str) and item for item in requires):
+            errors.append("policy.requires must contain non-empty capability names")
 
         return errors
 

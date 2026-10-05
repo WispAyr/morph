@@ -95,6 +95,10 @@ class MORPHSystem:
         if not self.schema.empty and entity not in self.schema.entities:
             raise ValueError(f"unknown entity '{entity}' (known: {sorted(self.schema.entities)})")
         payload = {**(fields or {}), **more}
+        if "id" in payload and payload["id"] != entity_id:
+            raise ValueError(
+                f"observation id '{payload['id']}' does not match entity instance id '{entity_id}'"
+            )
         if STATE_FIELD in payload and self.schema.entities.get(entity, EntityType(entity)).stateful:
             raise ValueError(f"'{STATE_FIELD}' is owned by the state machine of '{entity}'; it cannot be observed")
         errors = self.schema.validate_context({entity: {**payload, "id": entity_id}})

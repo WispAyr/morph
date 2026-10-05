@@ -57,6 +57,10 @@ class MORPHRuntime:
 
         self._predicates: list[Predicate] = []
         consistency_errors: list[str] = []
+        for name, capability in self.capability_specs.items():
+            for path in capability.requires or []:
+                for error in self.schema.validate_paths([path]):
+                    consistency_errors.append(f"capability '{name}'.requires: {error}")
         for policy in policies:
             policy_name = policy.get("name", "unknown")
             predicate = compile_when(policy.get("when"))
