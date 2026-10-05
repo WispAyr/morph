@@ -1,8 +1,9 @@
+import json
+
 import pytest
 
 from morph import MORPHRuntime
-
-
+from morph.ir import MORPHIR, ExecutionGraph
 from morph.validators import PolicyValidator
 
 
@@ -124,3 +125,60 @@ def test_requires_capability_for_override_action():
 def test_requires_policies_to_be_defined():
     with pytest.raises(ValueError):
         MORPHRuntime.from_dict({})
+
+
+def test_ir_parser_loads_json_system_definition():
+    system = json.dumps({
+        "name": "studio_control",
+        "version": "0.1.0",
+        "entities": [
+            {"name": "source", "state": {"status": "live"}},
+            {"name": "destination", "state": {"status": "ready"}},
+        ],
+        "policies": [
+            {
+                "name": "route_allowed",
+                "when": [
+                    {"field": "source.status", "equals": "live"},
+                    {"field": "destination.status", "equals": "ready"},
+                ],
+                "result": {"status": "allow", "action": "route_source"},
+            }
+        ],
+    })
+
+    ir = MORPHIR.from_json(system)
+
+    assert ir.name == "studio_control"
+    assert len(ir.policies) == 1
+    assert ir.policies[0]["name"] == "route_allowed"
+
+
+def test_execution_graph_evaluates_route_from_ir():
+    system = {
+        "name": "studio_control",
+        "version": "0.1.0",
+        "entities": [
+            {"name": "source", "state": {"status": "live"}},
+            {"name": "destination", "state": {"status": "ready"}},
+        ],
+        "policies": [
+            {
+                "name": "route_allowed",
+                "when": [
+                    {"field": "source.status", "equals": "live"},
+                    {"field": "destination.status", "equals": "ready"},
+                ],
+                "result": {"status": "allow", "action": "route_source"},
+            }
+        ],
+    }
+
+    graph = ExecutionGraph.from_ir(system)
+    decision = graph.evaluate({
+        "source": {"status": "live"},
+        "destination": {"status": "ready"},
+    })
+
+    assert decision["status"] == "allow"
+    assert decision["action"] == "route_source"
