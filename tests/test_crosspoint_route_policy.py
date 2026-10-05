@@ -3,6 +3,23 @@ import pytest
 from morph import MORPHRuntime
 
 
+from morph.validators import PolicyValidator
+
+
+def test_policy_validator_accepts_valid_crosspoint_policy():
+    policy = {
+        "name": "allowed_route_when_ready",
+        "when": [
+            {"field": "source.status", "equals": "live"},
+            {"field": "destination.status", "equals": "ready"},
+            {"field": "operator.capabilities", "contains": "route_control"},
+        ],
+        "result": {"status": "allow", "action": "route_source"},
+    }
+
+    assert PolicyValidator.validate(policy) == []
+
+
 def test_allows_route_when_source_destination_and_capabilities_are_valid():
     system = MORPHRuntime.from_dict(
         {

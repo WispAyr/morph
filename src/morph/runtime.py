@@ -2,35 +2,45 @@ from __future__ import annotations
 
 from typing import Any
 
+from .validators import PolicyValidator
+
 
 class MORPHRuntime:
-    """A tiny executable IR for AI-native policy evaluation."""
+    """A reusable engine for AI-native policy evaluation and operational decisions."""
 
-    def __init__(self, name: str, version: str, grace_period_minutes: int, policies: list[dict[str, Any]]):
+    def __init__(self, name: str, version: str, policies: list[dict[str, Any]], capabilities: dict[str, Any] | None = None):
         self.name = name
         self.version = version
-        self.grace_period_minutes = grace_period_minutes
         self.policies = policies
+        self.capabilities = capabilities or {}
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "MORPHRuntime":
         if not data or "policies" not in data or not data["policies"]:
             raise ValueError("MORPHRuntime requires a non-empty 'policies' definition.")
 
+        policies = data["policies"]
+        for policy in policies:
+            errors = PolicyValidator.validate(policy)
+            if errors:
+                raise ValueError(f"Invalid policy '{policy.get('name', 'unknown')}': {errors}")
+
         return cls(
             name=data.get("name", "morph"),
             version=data.get("version", "0.1.0"),
-            grace_period_minutes=int(data.get("grace_period_minutes", 0)),
-            policies=data["policies"],
+            policies=policies,
+            capabilities=data.get("capabilities"),
         )
 
     def evaluate(self, context: dict[str, Any]) -> dict[str, Any]:
         for policy in self.policies:
             if self._matches(policy.get("when", []), context):
-                result = dict(policy.get("result", {"status": "deny", "action": "create_enforcement_event"}))
+                result = dict(policy.get("result", {"status": "deny", "action": "raise_alert"}))
                 return {
                     "name": self.name,
                     "version": self.version,
+                    "policy": policy.get("name", "unknown"),
+                    "trace": [policy.get("name", "unknown")],
                     **result,
                 }
 
@@ -38,33 +48,47 @@ class MORPHRuntime:
             "name": self.name,
             "version": self.version,
             "status": "deny",
-            "action": "create_enforcement_event",
+            "action": "raise_alert",
             "reason": "no_matching_policy",
+            "trace": [],
         }
 
     def _matches(self, filters: list[dict[str, Any]], context: dict[str, Any]) -> bool:
         for item in filters:
-            field = item.get("field")
-            if not field:
-                continue
-
-            expected = self._resolve_field(context, field)
-            operator = item.get("equals")
-            if "equals" in item:
-                if expected != operator:
-                    return False
-                continue
-
-            if "lt" in item and not (expected < item["lt"]):
+            if not self._condition_matches(item, context):
                 return False
-            if "lte" in item and not (expected <= item["lte"]):
-                return False
-            if "gt" in item and not (expected > item["gt"]):
-                return False
-            if "gte" in item and not (expected >= item["gte"]):
-                return False
-
         return True
+
+    def _condition_matches(self, item: dict[str, Any], context: dict[str, Any]) -> bool:
+        field = item.get("field")
+        if not field:
+            return False
+
+        actual = self._resolve_field(context, field)
+
+        if "equals" in item:
+            return actual == item["equals"]
+
+        if "lt" in item:
+            return actual < item["lt"]
+
+        if "lte" in item:
+            return actual <= item["lte"]
+
+        if "gt" in item:
+            return actual > item["gt"]
+
+        if "gte" in item:
+            return actual >= item["gte"]
+
+        if "contains" in item:
+            if isinstance(actual, (list, tuple, set)):
+                return item["contains"] in actual
+            if isinstance(actual, str):
+                return item["contains"] in actual
+            return False
+
+        return False
 
     @staticmethod
     def _resolve_field(context: dict[str, Any], field: str) -> Any:
