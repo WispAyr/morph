@@ -1,4 +1,4 @@
-from .compiler import Compiler, PythonTarget
+from .compiler import Compiler, NodeTarget, PythonTarget, SQLTarget
 from .ir import ExecutionGraph, MORPHIR
 from .loader import load_system_definition
 from .planner import ExecutionPlanner
@@ -18,5 +18,7 @@ __all__ = [
     "WorkflowEngine",
     "Compiler",
     "PythonTarget",
+    "NodeTarget",
+    "SQLTarget",
     "load_system_definition",
 ]
