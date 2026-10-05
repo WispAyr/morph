@@ -102,7 +102,9 @@ def score_runs(runs: list[dict[str, Any]], reference: dict[str, Any], evaluation
         if expected_relationship not in RELATIONSHIPS:
             raise ValueError(f"reference task '{task_id}' has an invalid relationship")
         analysis = run["analysis"]
-        judge = run["judge"]
+        evaluation = evaluation_by_key.get((run["pair_id"], run["arm"]))
+        if evaluation is None:
+            raise ValueError(f"missing independent evaluation for pair '{run['pair_id']}' arm '{run['arm']}'")
         result = {
             "task_id": task_id,
             "pair_id": run["pair_id"],
@@ -112,10 +114,10 @@ def score_runs(runs: list[dict[str, Any]], reference: dict[str, Any], evaluation
             "impact_f1": f1,
             "relationship_correct": analysis["relationship"] == expected_relationship,
             "unknown_overclaim": expected_relationship == "unknown" and analysis["relationship"] != "unknown",
-            "implementation_complete": judge["implementation_complete"],
-            "tests_passed": judge["tests_passed"],
-            "simulation_passed": judge["simulation_passed"],
-            "invariants_status": judge["invariants_status"],
+            "implementation_complete": evaluation["implementation_complete"],
+            "tests_passed": evaluation["tests_passed"],
+            "simulation_passed": evaluation["simulation_passed"],
+            "invariants_status": evaluation["invariants_status"],
             "human_interventions": run["human_interventions"],
             "elapsed_seconds": run["elapsed_seconds"],
         }
