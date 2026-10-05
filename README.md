@@ -24,4 +24,8 @@ See the Phase 1 findings in [docs/phase1-findings.md](docs/phase1-findings.md).
 ```bash
 python -m pip install -e .[dev]
 pytest -q
+morph init demo.yaml
+morph compile demo.yaml --target node
 ```
+
+The CLI gives MORPH a real developer workflow: initialize a YAML definition, load it, and compile it into Python, Node, or SQL execution targets.

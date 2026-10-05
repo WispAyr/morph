@@ -8,6 +8,23 @@ from .runtime import MORPHRuntime
 class Compiler:
     """Compile a MORPH definition into an executable target plan."""
 
+    _TARGET_REGISTRY: dict[str, type[Any]] = {}
+
+    @classmethod
+    def register_target(cls, name: str, target_cls: type[Any]) -> None:
+        cls._TARGET_REGISTRY[name] = target_cls
+
+    @classmethod
+    def list_targets(cls) -> list[str]:
+        return sorted(cls._TARGET_REGISTRY)
+
+    @classmethod
+    def get_target(cls, name: str) -> type[Any]:
+        try:
+            return cls._TARGET_REGISTRY[name]
+        except KeyError as exc:
+            raise ValueError(f"Unknown target '{name}'. Registered targets: {sorted(cls._TARGET_REGISTRY)}") from exc
+
     @staticmethod
     def compile(ir: dict[str, Any], target: str = "python") -> dict[str, Any]:
         runtime = MORPHRuntime(
@@ -41,6 +58,9 @@ class Compiler:
                     if "equals" in clause:
                         conditions.append(f"{field} = '{clause['equals']}'")
             compiled["sql"] = "SELECT '" + actions[0]["action"] + "' AS action WHERE " + " AND ".join(conditions) + ";" if conditions else "SELECT '" + actions[0]["action"] + "' AS action;"
+
+        if target not in Compiler._TARGET_REGISTRY:
+            raise ValueError(f"Unknown target '{target}'. Registered targets: {sorted(Compiler._TARGET_REGISTRY)}")
 
         return compiled
 
@@ -120,3 +140,8 @@ class SQLTarget:
             "name": self.compiled.get("name", "morph"),
             "version": self.compiled.get("version", "0.1.0"),
         }
+
+
+Compiler.register_target("python", PythonTarget)
+Compiler.register_target("node", NodeTarget)
+Compiler.register_target("sql", SQLTarget)
