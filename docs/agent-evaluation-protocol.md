@@ -36,6 +36,7 @@ Every run records:
     "implementation_complete": false,
     "tests_passed": false,
     "simulation_passed": false,
+    "task_cases_passed": false,
     "invariants_status": "not_applicable"
   },
   "human_interventions": 0,
@@ -49,7 +50,17 @@ The scorer requires one `direct_source` and one `morph_mediated` record per `pai
 python benchmarks/score_agent_runs.py runs.jsonl --reference benchmarks/agent-study/reference.json --pretty
 ```
 
-The runner must keep `reference.json` and hidden acceptance tests outside the agent-visible mount until both arms for a task are complete. The checked-in pilot reference is for local judge validation; it is not an agent input.
+When scoring against the checked-in task index, also pass `--corpus benchmarks/agent-study/corpus.json`. The index pins each task to a baseline commit, prompt, definition, and expected implementation boundary. The scorer checks that the index and evaluator reference agree and that the run file covers every indexed task.
+
+The deterministic definition-case judge is `benchmarks/judge_candidate.py`. The evaluator runs it against each candidate definition and records its `task_cases_passed` result in the run artifact. It replays the pinned baseline first as a reference sanity check. For example:
+
+```bash
+python benchmarks/judge_candidate.py crosspoint-route-success-from-idle candidate.yaml --reference /private/evaluator/reference.json
+```
+
+This judge checks MORPH policy decisions and state transitions. It does not replace hidden implementation tests or establish implementation equivalence.
+
+The runner must keep `reference.json` and hidden acceptance tests outside the agent-visible mount until both arms for a task are complete. Files in `benchmarks/agent-study/` that contain evaluator labels are evaluator-only; do not mount them into agent workspaces. The checked-in references are for local judge validation, not agent input.
 
 Before source access in the MORPH-mediated arm, the agent records affected entities, policies, capabilities, state transitions, invariants, expected behavior, simulation scenarios, assumptions, and unresolved questions. Every invariant claim includes MORPH evidence or is marked UNKNOWN. Preserve this artifact so the later implementation cannot rewrite the agent's initial impact estimate.
 
@@ -73,6 +84,7 @@ The first experiment does not require a separate Adversary agent. Use hidden reg
 For each arm and across paired tasks, report:
 
 - Task completion and regression-test pass rate.
+- Deterministic task-case pass rate from the MORPH definition judge.
 - Precision and recall of affected-subject predictions against a human-authored reference.
 - Invariant regressions, including regressions found only by hidden tests or MORPH checks.
 - UNKNOWN rate and the number of UNKNOWN results that agents incorrectly report as safe.
@@ -98,6 +110,6 @@ Freeze twenty genuine change requests before the first run. Each task needs a ba
 
 Use the remaining four tasks for compound changes spanning multiple categories. Do not invent post-hoc tasks to favor either arm.
 
-The current repository does not contain provider runner integrations or a frozen twenty-task corpus. Those are prerequisites for executing and making claims from this experiment; this document defines the provider-neutral protocol, not results.
+The repository contains the latency pilot and a second state-transition task in a versioned corpus index. Provider runner integrations and the remaining eighteen frozen tasks are still prerequisites for executing and making claims from this experiment; the protocol and task index are not results.
 
-The first pilot task and its evaluator-only reference cases are in [benchmarks/agent-study/pilot-crosspoint-latency.md](../benchmarks/agent-study/pilot-crosspoint-latency.md) and [benchmarks/agent-study/reference.json](../benchmarks/agent-study/reference.json). The pilot validates the broadening category; nineteen more tasks are needed before the planned study.
+The task index is in [benchmarks/agent-study/corpus.json](../benchmarks/agent-study/corpus.json). The pilot and state-transition prompts are in [benchmarks/agent-study/pilot-crosspoint-latency.md](../benchmarks/agent-study/pilot-crosspoint-latency.md) and [benchmarks/agent-study/task-crosspoint-transition-scope.md](../benchmarks/agent-study/task-crosspoint-transition-scope.md); evaluator-only reference cases are in [benchmarks/agent-study/reference.json](../benchmarks/agent-study/reference.json). Eighteen more tasks are needed before the planned study.
