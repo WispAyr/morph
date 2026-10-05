@@ -150,6 +150,8 @@ morph system crosspoint.yaml --store events.jsonl history --kind transitioned
 
 `SemanticReasoner` provides deterministic proofs for a deliberately limited typed CEL fragment: Boolean logic, scalar comparisons, and literal-list membership over declared `bool`, `int`, `double`, and `string` fields. For example, `x > 10` and `x >= 11` are equivalent when `x` is declared `int`, but not when it is `double`. Field presence is part of the reasoning model because MORPH allows declared context fields to be absent. Unsupported syntax, undeclared types, and external capability semantics return `relationship: unknown` with `confidence: unknown`; they are never treated as proof of safety. `MORPHIR.diff()` preserves a rewritten invariant only when equivalence is proven.
 
+The provider-neutral paired experiment for comparing direct-source and MORPH-mediated agent changes is specified in [docs/agent-evaluation-protocol.md](docs/agent-evaluation-protocol.md). It defines the protocol; external provider runs and the twenty-task corpus are not included.
+
 ```python
 from morph import SemanticReasoner
 

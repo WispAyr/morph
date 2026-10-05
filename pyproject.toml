@@ -28,4 +28,4 @@ where = ["src"]
 morph = ["examples/*.yaml"]
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+pythonpath = ["src", "."]
