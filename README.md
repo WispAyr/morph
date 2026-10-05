@@ -1,6 +1,8 @@
-# MORPH for Crosspoint
+# MORPH
 
-MORPH is a small, AI-native system specification prototype for the WispAyr Crosspoint studio control plane. The focus is explicit state, policy, capability, and route semantics for live media operations rather than ad hoc imperative wiring.
+MORPH is a reusable foundation for AI-native software across all projects. It is not a single app or a single domain. It is a general operating model for turning human intent into explicit state, policy, capability, and validated execution.
+
+Crosspoint is the first proving ground, not the final scope. The same foundation can be applied to internal tools, production systems, automation workflows, agent orchestration, and product infrastructure.
 
 ## Phase 1 summary
 
@@ -8,12 +10,12 @@ This repository captures the core findings from the initial architecture review:
 
 - MORPH is not another programming language.
 - The right foundation is an AI-native IR with validator and execution semantics.
-- The first realistic domain is the Crosspoint studio graph: callers, cameras, desk channels, screens, and data feeds.
-- Safety and capability boundaries are critical for AI-generated route changes.
+- The first realistic domain is Crosspoint, because it exposes live state, route safety, and operational failure clearly.
+- The same pattern can scale to any product, workflow, or operational system.
 
 ## Included prototype
 
-The repo currently contains a minimal Python implementation of MORPH-style runtime logic for studio routing decisions. It evaluates whether a route is allowed based on source readiness, destination availability, and operator override rules.
+The repo currently contains a minimal Python implementation of MORPH-style runtime logic for route and operational decisions. It evaluates whether an action is allowed based on source state, destination state, capability checks, and policy rules.
 
 See the Phase 1 findings in [docs/phase1-findings.md](docs/phase1-findings.md).
 
