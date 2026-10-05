@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .expressions import compile_when
 from .loader import load_system_definition
 from .runtime import DENY_ACTION, MORPHRuntime
 from .validators import PolicyValidator
@@ -10,8 +11,8 @@ from .validators import PolicyValidator
 class WorkflowEngine:
     """A domain-agnostic workflow engine that executes steps in order.
 
-    Each step's `when` conditions are evaluated against the context; a step whose
-    conditions do not hold is skipped. The decision is `allow` when at least one step ran.
+    Each step's `when` condition is evaluated against the context; a step whose condition
+    does not hold is skipped. The decision is `allow` when at least one step ran.
     """
 
     def __init__(self, ir: Any):
@@ -21,14 +22,21 @@ class WorkflowEngine:
             version=getattr(ir, "version", "0.1.0"),
             policies=getattr(ir, "policies", []),
             capabilities=getattr(ir, "capabilities", {}),
+            entities=getattr(ir, "entities", None),
         )
+        self.schema = self.runtime.schema
 
         errors: list[str] = []
         for index, step in enumerate(self._steps()):
             if not isinstance(step, dict):
                 errors.append(f"workflow.steps[{index}] must be an object")
                 continue
-            errors.extend(PolicyValidator.validate_conditions(step.get("when", []), prefix=f"workflow.steps[{index}].when"))
+            prefix = f"workflow.steps[{index}].when"
+            condition_errors = PolicyValidator.validate_conditions(step.get("when", []), prefix=prefix)
+            errors.extend(condition_errors)
+            if not condition_errors:
+                paths = compile_when(step.get("when", [])).paths
+                errors.extend(f"{prefix}: {error}" for error in self.schema.validate_paths(paths))
         if errors:
             raise ValueError("Invalid workflow definition: " + "; ".join(errors))
 
@@ -47,6 +55,18 @@ class WorkflowEngine:
         return workflow_def.get("steps", []) if isinstance(workflow_def, dict) else []
 
     def execute(self, context: dict[str, Any]) -> dict[str, Any]:
+        context_errors = self.schema.validate_context(context)
+        if context_errors:
+            return {
+                "status": "deny",
+                "action": DENY_ACTION,
+                "reason": "invalid_context",
+                "errors": context_errors,
+                "plan": [],
+                "steps_executed": 0,
+                "steps_skipped": [],
+            }
+
         executed: list[str] = []
         skipped: list[str] = []
 

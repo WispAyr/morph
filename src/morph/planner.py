@@ -17,6 +17,7 @@ class ExecutionPlanner:
             version=self.ir.version,
             policies=self.ir.policies,
             capabilities=self.ir.capabilities,
+            entities=self.ir.entities,
         )
 
     @classmethod

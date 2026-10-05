@@ -57,29 +57,32 @@ class Compiler:
         if target not in Compiler._TARGET_REGISTRY:
             raise ValueError(f"Unknown target '{target}'. Registered targets: {sorted(Compiler._TARGET_REGISTRY)}")
 
-        # Constructing the runtime validates the policies before anything is emitted.
+        # Constructing the runtime validates the policies and schema before anything is emitted.
         runtime = MORPHRuntime(
             name=ir.get("name", "morph"),
             version=ir.get("version", "0.1.0"),
             policies=ir.get("policies", []),
             capabilities=ir.get("capabilities", {}),
+            entities=ir.get("entities"),
         )
 
         actions = []
-        for policy in runtime.policies:
+        for policy, predicate in zip(runtime.policies, runtime._predicates):
             result = policy.get("result", {})
             actions.append({
                 "name": policy.get("name", "unknown"),
                 "action": result.get("action", DENY_ACTION),
                 "status": result.get("status", "deny"),
                 "requires": policy.get("requires", []),
-                "when": list(policy.get("when", [])),
+                # The normalised CEL form is what targets evaluate; it is language-neutral.
+                "when": predicate.source,
             })
 
         compiled: dict[str, Any] = {
             "target": target,
             "name": runtime.name,
             "version": runtime.version,
+            "entities": runtime.schema.to_dict(),
             "capabilities": dict(runtime.capabilities),
             "plan": actions,
         }
@@ -98,10 +101,17 @@ class Compiler:
         status = result.get("status", "deny")
         action = result.get("action", DENY_ACTION)
 
+        when = policy.get("when", [])
+        if not isinstance(when, list) or not all(isinstance(clause, dict) for clause in when):
+            raise ValueError(
+                f"Policy '{policy.get('name', 'unknown')}' uses a CEL expression; the SQL target "
+                "can only translate structured clause lists."
+            )
+
         clauses: list[str] = []
         literal_clauses: list[str] = []
         params: list[Any] = []
-        for clause in policy.get("when", []):
+        for clause in when:
             column = _sql_column(clause["field"])
             for operator, symbol in _SQL_OPERATORS.items():
                 if operator in clause:
@@ -140,6 +150,7 @@ def _runtime_from_plan(compiled: dict[str, Any]) -> MORPHRuntime:
             for entry in compiled.get("plan", [])
         ],
         capabilities=compiled.get("capabilities", {}),
+        entities=compiled.get("entities"),
     )
 
 

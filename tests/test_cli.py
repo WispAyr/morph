@@ -31,7 +31,7 @@ def test_cli_compile_yaml(tmp_path: Path, capsys) -> None:
     assert exit_code == 0
     compiled = json.loads(capsys.readouterr().out)
     assert compiled["target"] == "node"
-    assert compiled["plan"][0]["when"] == [{"field": "route.status", "equals": "ready"}]
+    assert compiled["plan"][0]["when"] == '(route.status == "ready")'
 
 
 def test_cli_compile_reports_missing_file(tmp_path: Path, capsys) -> None:
@@ -63,6 +63,40 @@ def test_cli_run_evaluates_context_from_file_and_overrides(tmp_path: Path, capsy
     decision = json.loads(capsys.readouterr().out)
     assert decision["status"] == "allow"
     assert decision["policy"] == "allow_route"
+
+
+def test_cli_init_template_validates_and_runs(tmp_path: Path, capsys) -> None:
+    target = tmp_path / "demo.yaml"
+
+    assert main(["init", str(target)]) == 0
+    capsys.readouterr()
+    assert main(["validate", str(target)]) == 0
+    assert capsys.readouterr().out.startswith("ok: my_system 0.1.0: 2 policies, 1 entities")
+
+    assert main(["run", str(target), "--set", "route.status=ready"]) == 0
+    capsys.readouterr()
+    assert main(["run", str(target), "--set", "route.status=ready", "--set", "route.locked=true"]) == 2
+    assert json.loads(capsys.readouterr().out)["policy"] == "deny_locked_route"
+
+
+def test_cli_validate_reports_schema_typo(tmp_path: Path, capsys) -> None:
+    source = tmp_path / "typo.yaml"
+    source.write_text(
+        "entities:\n  - name: route\n    fields: {status: string}\n"
+        "policies:\n  - name: p\n    when: route.staus == 'ready'\n    result: {status: allow, action: ok}\n",
+        encoding="utf-8",
+    )
+
+    assert main(["validate", str(source)]) == 1
+    assert "unknown field 'route.staus'" in capsys.readouterr().out
+
+
+def test_cli_run_explain(tmp_path: Path, capsys) -> None:
+    source = _write_definition(tmp_path)
+
+    assert main(["run", str(source), "--set", "route.status=busy", "--explain"]) == 2
+    report = json.loads(capsys.readouterr().out)
+    assert report["policies"][0]["condition_holds"] is False
 
 
 def test_cli_run_parses_override_scalars(tmp_path: Path, capsys) -> None:

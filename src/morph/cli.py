@@ -8,18 +8,33 @@ from typing import Any, Sequence
 import yaml
 
 from .compiler import Compiler
+from .ir import MORPHIR
 from .loader import load_system_definition
 from .project import ProjectScaffold
 from .runtime import MORPHRuntime
+from .workflow import WorkflowEngine
 
 
 DEFAULT_TEMPLATE = """name: my_system
 version: 0.1.0
+
+# Entities declare the shape of the context. Policies may only read declared fields.
+entities:
+  - name: route
+    fields:
+      status: string
+      locked: bool
+
+# Policies are evaluated in order; the first whose condition holds decides.
+# Conditions are CEL expressions: https://cel.dev
 policies:
+  - name: deny_locked_route
+    when: has(route.locked) && route.locked
+    result:
+      status: deny
+      action: raise_alert
   - name: allow_route
-    when:
-      - field: route.status
-        equals: ready
+    when: route.status == "ready"
     result:
       status: allow
       action: route_source
@@ -29,7 +44,7 @@ policies:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="morph",
-        description="MORPH CLI for loading system definitions, evaluating them, and compiling them to execution targets.",
+        description="MORPH CLI for validating, evaluating, and compiling system definitions.",
     )
     subparsers = parser.add_subparsers(dest="command")
 
@@ -39,6 +54,9 @@ def _build_parser() -> argparse.ArgumentParser:
     new_parser = subparsers.add_parser("new", help="Create a MORPH project from a registered template.")
     new_parser.add_argument("path", help="Destination directory for the new MORPH project.")
     new_parser.add_argument("--template", default="service", choices=ProjectScaffold.list_templates(), help="Project template to apply.")
+
+    validate_parser = subparsers.add_parser("validate", help="Check a MORPH YAML definition without evaluating it.")
+    validate_parser.add_argument("source", help="Path to the YAML file to validate.")
 
     compile_parser = subparsers.add_parser("compile", help="Compile a MORPH YAML definition to a target backend.")
     compile_parser.add_argument("source", help="Path to the YAML file to compile.")
@@ -56,9 +74,20 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="PATH=VALUE",
         help="Set a dotted context path, e.g. --set source.status=live. Values are parsed as YAML scalars.",
     )
+    run_parser.add_argument("--explain", action="store_true", help="Report how every policy fared, not just the decision.")
     run_parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output.")
 
     return parser
+
+
+def _build_runtime(definition: MORPHIR) -> MORPHRuntime:
+    return MORPHRuntime(
+        name=definition.name,
+        version=definition.version,
+        policies=definition.policies,
+        capabilities=definition.capabilities,
+        entities=definition.entities,
+    )
 
 
 def _cmd_init(path: str) -> int:
@@ -69,6 +98,26 @@ def _cmd_init(path: str) -> int:
 
     destination.write_text(DEFAULT_TEMPLATE, encoding="utf-8")
     print(f"Created MORPH definition at {destination}")
+    return 0
+
+
+def _cmd_validate(source: str) -> int:
+    try:
+        definition = load_system_definition(Path(source))
+        runtime = _build_runtime(definition)
+        workflow_steps = 0
+        if definition.workflow:
+            workflow_steps = len(WorkflowEngine(definition)._steps())
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        print(f"error: {exc}")
+        return 1
+
+    summary = f"ok: {definition.name} {definition.version}: {len(runtime.policies)} policies, {len(runtime.schema.entities)} entities"
+    if workflow_steps:
+        summary += f", {workflow_steps} workflow steps"
+    if runtime.schema.empty:
+        summary += " (no entity schema: field paths are unchecked)"
+    print(summary)
     return 0
 
 
@@ -112,17 +161,12 @@ def _load_context(path: str | None, overrides: Sequence[str]) -> dict[str, Any]:
     return context
 
 
-def _cmd_run(source: str, context_path: str | None, overrides: Sequence[str], pretty: bool) -> int:
+def _cmd_run(source: str, context_path: str | None, overrides: Sequence[str], explain: bool, pretty: bool) -> int:
     try:
         definition = load_system_definition(Path(source))
         context = _load_context(context_path, overrides)
-        runtime = MORPHRuntime(
-            name=definition.name,
-            version=definition.version,
-            policies=definition.policies,
-            capabilities=definition.capabilities,
-        )
-        decision = runtime.evaluate(context)
+        runtime = _build_runtime(definition)
+        decision = runtime.explain(context) if explain else runtime.evaluate(context)
     except (OSError, ValueError, yaml.YAMLError) as exc:
         print(f"error: {exc}")
         return 1
@@ -152,11 +196,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "new":
         return _cmd_new(args.path, args.template)
 
+    if args.command == "validate":
+        return _cmd_validate(args.source)
+
     if args.command == "compile":
         return _cmd_compile(args.source, args.target, args.pretty)
 
     if args.command == "run":
-        return _cmd_run(args.source, args.context, args.overrides, args.pretty)
+        return _cmd_run(args.source, args.context, args.overrides, args.explain, args.pretty)
 
     parser.print_help()
     return 0

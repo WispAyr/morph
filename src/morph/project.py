@@ -60,20 +60,29 @@ def _service_template_builder(project_name: str, project_dir: Path) -> None:
     (project_dir / "morph.yaml").write_text(
         f"""name: {package}
 version: 0.1.0
+
+entities:
+  - name: system
+    fields:
+      status: string
+      load: double
+
 policies:
+  - name: shed_load
+    when: has(system.load) && system.load > 0.9
+    result:
+      status: deny
+      action: raise_alert
   - name: default_control
-    when:
-      - field: system.status
-        equals: ready
+    when: system.status == "ready"
     result:
       status: allow
       action: handle_request
+
 workflow:
   steps:
     - name: route_request
-      when:
-        - field: system.status
-          equals: ready
+      when: system.status == "ready"
       then:
         action: handle_request
 """,
@@ -118,7 +127,9 @@ MORPH project scaffold generated with the `service` template.
 ```bash
 python -m pip install -e .[dev]
 pytest -q
+morph validate morph.yaml
 morph run morph.yaml --set system.status=ready
+morph run morph.yaml --set system.status=ready --set system.load=0.95 --explain
 morph compile morph.yaml --target node
 ```
 """,
@@ -153,6 +164,7 @@ class ServiceRuntime(MORPHRuntime):
             version=definition.version,
             policies=definition.policies,
             capabilities=definition.capabilities,
+            entities=definition.entities,
         )
 ''',
         encoding="utf-8",
@@ -168,6 +180,7 @@ def test_generated_definition_allows_ready_system() -> None:
 
     assert runtime.evaluate({{"system": {{"status": "ready"}}}})["status"] == "allow"
     assert runtime.evaluate({{"system": {{"status": "down"}}}})["status"] == "deny"
+    assert runtime.evaluate({{"system": {{"status": "ready", "load": 0.95}}}})["policy"] == "shed_load"
 ''',
         encoding="utf-8",
     )

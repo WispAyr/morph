@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..expressions import ExpressionError, compile_when
+
 CONDITION_OPERATORS = ("equals", "lt", "lte", "gt", "gte", "contains")
 CONDITION_KEYS = {"field", *CONDITION_OPERATORS}
 
@@ -11,15 +13,24 @@ class PolicyValidator:
 
     @staticmethod
     def validate_conditions(conditions: Any, prefix: str = "when") -> list[str]:
-        """Validate a list of `when` clauses. Returns a list of human-readable errors."""
+        """Validate a `when` block: a CEL string, or a list of CEL strings and/or clauses."""
+        if conditions is None:
+            return []
+
+        if isinstance(conditions, str):
+            return PolicyValidator._compile_errors(conditions, prefix)
+
         if not isinstance(conditions, list):
-            return [f"{prefix} must be a list"]
+            return [f"{prefix} must be a CEL expression string or a list of clauses"]
 
         errors: list[str] = []
         for index, condition in enumerate(conditions):
             label = f"{prefix}[{index}]"
+            if isinstance(condition, str):
+                errors.extend(PolicyValidator._compile_errors(condition, label))
+                continue
             if not isinstance(condition, dict):
-                errors.append(f"{label} must be an object")
+                errors.append(f"{label} must be an object or a CEL expression string")
                 continue
 
             field = condition.get("field")
@@ -33,7 +44,17 @@ class PolicyValidator:
             if not any(operator in condition for operator in CONDITION_OPERATORS):
                 errors.append(f"{label} must declare at least one operator: {list(CONDITION_OPERATORS)}")
 
+        if not errors:
+            errors.extend(PolicyValidator._compile_errors(conditions, prefix))
         return errors
+
+    @staticmethod
+    def _compile_errors(conditions: Any, label: str) -> list[str]:
+        try:
+            compile_when(conditions)
+        except ExpressionError as exc:
+            return [f"{label}: {exc}"]
+        return []
 
     @staticmethod
     def validate(policy: dict[str, Any]) -> list[str]:

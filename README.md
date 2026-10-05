@@ -25,20 +25,50 @@ See the Phase 1 findings in [docs/phase1-findings.md](docs/phase1-findings.md).
 python -m pip install -e .[dev]
 pytest -q
 morph init demo.yaml
+morph validate demo.yaml
 morph run demo.yaml --set route.status=ready
+morph run demo.yaml --set route.status=ready --set route.locked=true --explain
 morph compile demo.yaml --target node
 ```
 
+Installation needs a virtual environment or user site on Debian-based systems, because a dependency pins PyYAML and the system copy cannot be replaced.
+
 The CLI gives MORPH a real developer workflow: initialize a YAML definition, scaffold a reusable project, evaluate it against a context, and compile it into Python, Node, or SQL execution targets. `morph run` exits 0 on an allow decision and 2 on a deny, so it can gate scripts directly.
+
+## Definition format
+
+```yaml
+name: crosspoint
+version: 0.3.0
+
+entities:                      # the typed shape of the context
+  - name: source
+    fields: {status: string, latency_ms: int}
+  - name: route
+    fields: {locked: bool}
+  - name: operator
+    fields: {capabilities: list}
+
+policies:                      # evaluated in order; first match decides
+  - name: deny_locked
+    when: route.locked
+    result: {status: deny, action: raise_alert}
+  - name: allow_live_route
+    requires: [route_control]
+    when: source.status == "live" && source.latency_ms < 120
+    result: {status: allow, action: route_source}
+```
+
+Conditions are [CEL](https://cel.dev) expressions. CEL is typed, deterministic, and not Turing-complete, so a condition can always be checked and explained. It gives you `&&`, `||`, `!`, comparisons, `in`, `has()` for optional fields, `size()`, string functions, and the collection macros `all`, `exists`, `filter`, and `map`. The original structured clause form (`{field, equals|lt|lte|gt|gte|contains}`) is still accepted and is translated to CEL.
 
 ## Evaluation semantics
 
-- Decisions are deny-by-default. A policy matches only when every `when` clause holds and every capability it `requires` is granted.
-- A clause may combine operators (`equals`, `lt`, `lte`, `gt`, `gte`, `contains`); all of them must hold.
-- A field that is missing from the context, null, or not comparable with the operand never matches. Evaluation does not raise on bad input.
+- Decisions are deny-by-default. A policy matches only when its condition holds and every capability it `requires` is granted.
+- A condition that reads a missing field, compares incompatible types, or does not produce a boolean never matches. Evaluation does not raise on bad input. Use `has(x.y)` to make optional fields explicit.
+- Once a definition declares `entities`, every field a policy reads must be declared, and this is checked when the definition loads. A context whose declared fields carry the wrong type is denied with reason `invalid_context` before any policy runs.
 - Capabilities resolve through `operator.capabilities` unless the definition declares the capability under `capabilities` with its own `requires` context paths.
-- Every entry point (runtime, planner, workflow, state machine, compiler, CLI) validates the definition before evaluating it.
-- Compiled plans keep each policy's conditions, so the Python, Node, and SQL targets reach the same decision as the runtime. The SQL target emits one parameterised statement per policy and refuses `contains`, which it cannot express.
+- Every entry point (runtime, planner, workflow, state machine, compiler, CLI) validates the definition before evaluating it. `morph validate` runs the same checks on their own, and `morph run --explain` shows how each policy fared.
+- Compiled plans carry each policy's normalised CEL condition and the entity schema, so the Python and Node targets reach the same decision as the runtime. The SQL target only translates structured clause lists, emits one parameterised statement per policy, and refuses `contains`.
 
 ```bash
 morph new my_service --template service
