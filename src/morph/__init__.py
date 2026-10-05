@@ -18,6 +18,8 @@ from .project import ProjectScaffold, ProjectTemplate
 from .runtime import MORPHRuntime
 from .schema import EntityType, Schema
 from .state import StateMachine
+from .store import Event, EventStore
+from .system import MORPHSystem
 from .validators import CapabilityValidator, PolicyValidator
 from .workflow import WorkflowEngine
 
@@ -53,5 +55,8 @@ __all__ = [
     "EffectRecord",
     "ExecutionResult",
     "load_adapters",
+    "Event",
+    "EventStore",
+    "MORPHSystem",
     "load_system_definition",
 ]

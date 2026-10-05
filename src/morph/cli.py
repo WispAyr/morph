@@ -13,6 +13,8 @@ from .ir import MORPHIR
 from .loader import load_system_definition
 from .project import ProjectScaffold
 from .runtime import MORPHRuntime
+from .store import EventStore
+from .system import MORPHSystem
 from .workflow import WorkflowEngine
 
 
@@ -83,7 +85,83 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     run_parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output.")
 
+    system_parser = subparsers.add_parser("system", help="Operate a durable, event-sourced system over a definition.")
+    system_parser.add_argument("source", help="Path to the YAML definition.")
+    system_parser.add_argument("--store", required=True, help="JSON Lines file holding the event log (created if missing).")
+    system_sub = system_parser.add_subparsers(dest="system_command")
+
+    observe_parser = system_sub.add_parser("observe", help="Record fields for an entity instance.")
+    observe_parser.add_argument("entity")
+    observe_parser.add_argument("id")
+    observe_parser.add_argument("fields", nargs="*", metavar="FIELD=VALUE", help="Values are parsed as YAML scalars.")
+
+    act_parser = system_sub.add_parser("act", help="Decide for the bound entity instances and execute the effect.")
+    act_parser.add_argument("--adapters", required=True, metavar="MODULE:ATTR")
+    act_parser.add_argument("bindings", nargs="*", metavar="ENTITY=ID")
+    act_parser.add_argument("--set", dest="overrides", action="append", default=[], metavar="PATH=VALUE", help="Extra context values.")
+    act_parser.add_argument("--pretty", action="store_true")
+
+    state_parser = system_sub.add_parser("state", help="Show the projection, one entity, or one instance.")
+    state_parser.add_argument("entity", nargs="?")
+    state_parser.add_argument("id", nargs="?")
+
+    history_parser = system_sub.add_parser("history", help="Show recorded events.")
+    history_parser.add_argument("--stream")
+    history_parser.add_argument("--kind", action="append", dest="kinds")
+
     return parser
+
+
+def _parse_assignments(items: Sequence[str], label: str) -> dict[str, Any]:
+    values: dict[str, Any] = {}
+    for item in items:
+        key, separator, raw = item.partition("=")
+        if not separator or not key:
+            raise ValueError(f"Invalid {label} '{item}'. Expected KEY=VALUE.")
+        values[key] = yaml.safe_load(raw) if raw != "" else ""
+    return values
+
+
+def _cmd_system(args: argparse.Namespace) -> int:
+    try:
+        definition = load_system_definition(Path(args.source))
+        store = EventStore(args.store)
+        command = args.system_command
+
+        if command == "observe":
+            system = MORPHSystem(definition, store=store)
+            event = system.observe(args.entity, args.id, _parse_assignments(args.fields, "field"))
+            print(json.dumps({"event": event.to_dict(), "state": system.state(args.entity, args.id)}))
+            return 0
+
+        if command == "act":
+            system = MORPHSystem(definition, load_adapters(args.adapters), store)
+            bindings = {key: str(value) for key, value in _parse_assignments(args.bindings, "binding").items()}
+            context = system.context(bindings, extra=_load_context(None, args.overrides))
+            result = system.act(context)
+            print(json.dumps(result.to_dict(), indent=2 if args.pretty else None))
+            return 1 if result.status == "failed" else (0 if result.decision.get("status") == "allow" else 2)
+
+        if command == "state":
+            system = MORPHSystem(definition, store=store)
+            if args.entity and args.id:
+                print(json.dumps(system.state(args.entity, args.id)))
+            elif args.entity:
+                print(json.dumps(system.snapshot()["entities"].get(args.entity, {})))
+            else:
+                print(json.dumps(system.snapshot()))
+            return 0
+
+        if command == "history":
+            system = MORPHSystem(definition, store=store)
+            print(json.dumps(system.history(stream=args.stream, kinds=args.kinds)))
+            return 0
+    except (OSError, ValueError, TypeError, ImportError, RuntimeError, yaml.YAMLError) as exc:
+        print(f"error: {exc}")
+        return 1
+
+    print("usage: morph system <definition> --store <file> {observe,act,state,history} ...")
+    return 1
 
 
 def _build_runtime(definition: MORPHIR) -> MORPHRuntime:
@@ -228,6 +306,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "run":
         return _cmd_run(args.source, args.context, args.overrides, args.explain, args.adapters, args.pretty)
+
+    if args.command == "system":
+        return _cmd_system(args)
 
     parser.print_help()
     return 0

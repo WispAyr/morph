@@ -100,6 +100,41 @@ executor.log.records()                           # every attempt, with inputs, o
 
 The executor re-checks the capability grant before calling an adapter, type-checks inputs and outputs against the capability, skips a repeat with the same idempotency key, retries only failures the adapter marks retryable, and turns adapter exceptions into failure records rather than crashes. Once a definition declares `actions`, every allow policy must name a bound action, and this is checked at load. `morph run --adapters package.module:ATTR` executes from the command line. The worked example in `src/morph/examples/crosspoint.yaml` drives a fake studio router.
 
+## Durable state
+
+A `MORPHSystem` keeps state as an append-only event log, in memory or in a JSON Lines file. Observations, decisions, effect attempts, and state transitions are all events, and the current state of every entity instance is a fold over them, so a system can be rebuilt from the log alone and never re-runs an effect it already completed.
+
+```yaml
+entities:
+  - name: destination
+    fields: {id: string, status: string}
+    states: [idle, routed, faulted]          # exposes destination.state to policies
+    initial: idle
+    transitions:
+      - {on: route_source.succeeded, from: "*", to: routed}
+      - {on: observed, to: faulted, when: 'event.fields.status == "faulted"'}
+```
+
+```python
+from morph import EventStore, MORPHSystem
+
+system = MORPHSystem(definition, adapters, EventStore("crosspoint.jsonl"))
+system.observe("source", "cam1", status="live", latency_ms=40)
+system.observe("destination", "wall", status="ready", latency_ms=60)
+result = system.act(source="cam1", destination="wall", operator="ewan")
+system.state("destination", "wall")          # {'id': 'wall', ..., 'state': 'routed'}
+system.history(kinds=["transitioned"])
+```
+
+Transitions fire on `observed` and on `<action>.<outcome>` events (`succeeded`, `failed`, `skipped`, `denied`). Their `when` may read the entity, the rest of the context, and `event`. By default a transition targets the instance bound under its entity name in the context; `id: <expression>` targets another. YAML parses a bare `on:` key as boolean, which the loader tolerates, but quoting it as `"on":` avoids editor confusion. The same is available from the command line:
+
+```bash
+morph system crosspoint.yaml --store events.jsonl observe source cam1 status=live latency_ms=40
+morph system crosspoint.yaml --store events.jsonl act --adapters morph.examples.crosspoint:adapters source=cam1 destination=wall operator=ewan
+morph system crosspoint.yaml --store events.jsonl state destination wall
+morph system crosspoint.yaml --store events.jsonl history --kind transitioned
+```
+
 ## Evaluation semantics
 
 - Decisions are deny-by-default. A policy matches only when its condition holds and every capability it `requires` is granted.

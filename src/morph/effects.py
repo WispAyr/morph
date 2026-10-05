@@ -443,6 +443,13 @@ class EffectExecutor:
         """Evaluate the context and execute the resulting decision."""
         return self.execute(self.runtime.evaluate(context), context)
 
+    def remember(self, idempotency_key: str, outputs: dict[str, Any]) -> None:
+        """Mark an effect as already completed, e.g. when replaying a durable log."""
+        self._completed[idempotency_key] = dict(outputs)
+
+    def completed_keys(self) -> list[str]:
+        return sorted(self._completed)
+
     def execute(self, decision: dict[str, Any], context: dict[str, Any]) -> ExecutionResult:
         action_name = decision.get("action")
         decision_status = decision.get("status")

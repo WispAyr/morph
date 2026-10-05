@@ -17,6 +17,8 @@ from typing import Any
 from ..effects import AdapterRegistry, EffectExecutor, EffectFailure, EffectLog
 from ..loader import load_system_definition
 from ..runtime import MORPHRuntime
+from ..store import EventStore
+from ..system import MORPHSystem
 
 DEFINITION_PATH = Path(__file__).with_name("crosspoint.yaml")
 
@@ -95,3 +97,8 @@ def build(
 def adapters() -> AdapterRegistry:
     """Factory for ``morph run --adapters morph.examples.crosspoint:adapters``."""
     return registry()
+
+
+def system(store: EventStore | None = None, router: FakeRouter | None = None, notifier: FakeNotifier | None = None) -> MORPHSystem:
+    """A stateful Crosspoint system over the given event store."""
+    return MORPHSystem(load_system_definition(DEFINITION_PATH), registry(router, notifier), store)
