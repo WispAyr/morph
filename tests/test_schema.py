@@ -229,3 +229,121 @@ def test_morph_ir_preserves_invariants_across_semantic_changes():
 
     blocked = baseline.diff(unsafe)
     assert blocked["blocked"] == ["live_route"]
+
+
+def test_morph_ir_can_inspect_and_simulate_system_semantics():
+    from morph import MORPHIR
+
+    system = MORPHIR.from_dict(
+        {
+            "name": "studio",
+            "version": "0.8.0",
+            "entities": [{"name": "source", "fields": {"status": "string", "latency_ms": "int"}}],
+            "capabilities": {"route_control": {"requires": ["operator.capabilities"], "inputs": {"source": "string"}, "failures": ["blocked"]}},
+            "actions": {"route_source": {"capability": "route_control", "inputs": {"source": "source.status"}}},
+            "policies": [{"name": "allow_live", "when": 'source.status == "live" && source.latency_ms < 120', "result": {"status": "allow", "action": "route_source"}}],
+            "invariants": [{"name": "safe_routing", "when": 'source.status == "live" && source.latency_ms < 120'}],
+        }
+    )
+
+    inspection = system.inspect()
+    assert inspection["summary"]["policy_count"] == 1
+    assert inspection["entities"][0]["name"] == "source"
+    assert inspection["invariants"][0]["name"] == "safe_routing"
+
+    results = system.simulate([
+        {"source": {"status": "live", "latency_ms": 42}},
+        {"source": {"status": "offline", "latency_ms": 42}},
+    ])
+    assert results["passed"][0]["decision"]["status"] == "allow"
+    assert results["failed"][0]["index"] == 1
+
+
+def test_morph_ir_can_plan_semantic_changes():
+    from morph import MORPHIR
+
+    baseline = MORPHIR.from_dict(
+        {
+            "name": "studio",
+            "version": "0.7.0",
+            "entities": [{"name": "source", "fields": {"status": "string", "latency_ms": "int"}}],
+            "intent": {"summary": "Only live sources with low latency can route."},
+            "invariants": [{"name": "live_route", "when": 'source.status == "live" && source.latency_ms < 120'}],
+            "policies": [{"name": "allow_live", "when": 'source.status == "live" && source.latency_ms < 120', "result": {"status": "allow", "action": "ok"}}],
+        }
+    )
+
+    blocked = MORPHIR.from_dict(
+        {
+            "name": "studio",
+            "version": "0.7.1",
+            "entities": [{"name": "source", "fields": {"status": "string", "latency_ms": "int"}}],
+            "intent": {"summary": "Only live sources with low latency can route."},
+            "invariants": [{"name": "live_route", "when": 'source.status == "ready" && source.latency_ms < 120'}],
+            "policies": [{"name": "allow_ready", "when": 'source.status == "ready" && source.latency_ms < 120', "result": {"status": "allow", "action": "ok"}}],
+        }
+    )
+
+    plan = baseline.plan_change(blocked)
+    assert plan["status"] == "blocked"
+    assert "live_route" in plan["diff"]["blocked"]
+
+    safe = MORPHIR.from_dict(
+        {
+            "name": "studio",
+            "version": "0.7.1",
+            "entities": [{"name": "source", "fields": {"status": "string", "latency_ms": "int"}}],
+            "intent": {"summary": "Only live sources with low latency can route."},
+            "invariants": [
+                {"name": "live_route", "when": 'source.status == "live" && source.latency_ms < 120'},
+                {"name": "source_is_known", "when": 'has(source.status)'}
+            ],
+            "policies": [
+                {"name": "allow_live", "when": 'source.status == "live" && source.latency_ms < 120', "result": {"status": "allow", "action": "ok"}},
+                {"name": "check_known", "when": 'has(source.status)', "result": {"status": "allow", "action": "ok"}},
+            ],
+        }
+    )
+
+    safe_plan = baseline.plan_change(safe)
+    assert safe_plan["status"] == "safe"
+    assert safe_plan["diff"]["added"] == ["source_is_known"]
+    assert any(change["kind"] == "invariant" and change["action"] == "add" and change["name"] == "source_is_known" for change in safe_plan["changes"])
+
+    blocked_plan = baseline.plan_change(blocked)
+    assert blocked_plan["status"] == "blocked"
+    assert any(change["kind"] == "invariant" and change["action"] == "rewrite" for change in blocked_plan["changes"])
+
+
+def test_morph_ir_can_map_semantics_and_compute_impact():
+    from morph import MORPHIR
+
+    system = MORPHIR.from_dict(
+        {
+            "name": "parking",
+            "version": "0.9.0",
+            "entities": [{"name": "ParkingSession", "fields": {"arrival_time": "int", "status": "string"}}],
+            "policies": [{
+                "name": "grace_period",
+                "when": 'ParkingSession.status == "active" && ParkingSession.arrival_time < 30',
+                "depends_on": ["ParkingSession.arrival_time", "ParkingSession.status"],
+                "affects": ["enforcement decision", "ParkingSession.status"],
+                "result": {"status": "allow", "action": "evaluate"},
+            }],
+            "capabilities": {"enforce": {"requires": ["ParkingSession.status"], "affects": ["ParkingSession.status"]}},
+            "actions": {"evaluate": {"capability": "enforce", "inputs": {"session": "ParkingSession"}}},
+            "invariants": [{"name": "permit_exempt", "when": 'ParkingSession.status == "active"'}],
+        }
+    )
+
+    semantic_map = system.semantic_map()
+    assert semantic_map["entities"]["ParkingSession"]["policies"] == ["grace_period"]
+    assert semantic_map["policies"]["grace_period"]["depends_on"] == ["ParkingSession.arrival_time", "ParkingSession.status"]
+
+    impact = system.impact("ParkingSession.status")
+    assert impact["subjects"] == ["ParkingSession.status"]
+    assert "grace_period" in impact["policies"]
+    assert "enforce" in impact["capabilities"]
+
+    equivalent = system.equivalent_to(system)
+    assert equivalent is True

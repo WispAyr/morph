@@ -111,6 +111,50 @@ def test_cli_run_parses_override_scalars(tmp_path: Path, capsys) -> None:
     assert main(["run", str(source), "--set", "latency_ms=500"]) == 2
 
 
+def test_cli_inspect_and_simulate_semantics(tmp_path: Path, capsys) -> None:
+    source = tmp_path / "system.yaml"
+    source.write_text(
+        "name: studio\nversion: 0.8.0\nentities:\n  - name: source\n    fields: {status: string, latency_ms: int}\npolicies:\n  - name: allow_live\n    when: 'source.status == \"live\" && source.latency_ms < 120'\n    result: {status: allow, action: ok}\ninvariants:\n  - name: safe_routing\n    when: 'source.status == \"live\" && source.latency_ms < 120'\n",
+        encoding="utf-8",
+    )
+    scenarios = tmp_path / "scenarios.yaml"
+    scenarios.write_text(
+        "- source: {status: live, latency_ms: 42}\n- source: {status: offline, latency_ms: 42}\n",
+        encoding="utf-8",
+    )
+
+    assert main(["inspect", str(source)]) == 0
+    inspect_report = json.loads(capsys.readouterr().out)
+    assert inspect_report["summary"]["policy_count"] == 1
+    assert inspect_report["invariants"][0]["name"] == "safe_routing"
+
+    assert main(["explain", str(source)]) == 0
+    explain_report = json.loads(capsys.readouterr().out)
+    assert explain_report["summary"]["policy_count"] == 1
+
+    assert main(["simulate", str(source), "--context", str(scenarios)]) == 1
+    simulate_report = json.loads(capsys.readouterr().out)
+    assert simulate_report["failed"][0]["index"] == 1
+
+
+def test_cli_plan_reports_semantic_change_status(tmp_path: Path, capsys) -> None:
+    baseline = tmp_path / "baseline.yaml"
+    candidate = tmp_path / "candidate.yaml"
+    baseline.write_text(
+        "name: studio\nversion: 0.7.0\nentities:\n  - name: source\n    fields: {status: string, latency_ms: int}\nintent:\n  summary: Only live sources with low latency can route.\ninvariants:\n  - name: live_route\n    when: 'source.status == \"live\" && source.latency_ms < 120'\n",
+        encoding="utf-8",
+    )
+    candidate.write_text(
+        "name: studio\nversion: 0.7.1\nentities:\n  - name: source\n    fields: {status: string, latency_ms: int}\nintent:\n  summary: Only live sources with low latency can route.\ninvariants:\n  - name: live_route\n    when: 'source.status == \"ready\" && source.latency_ms < 120'\n",
+        encoding="utf-8",
+    )
+
+    assert main(["plan", str(baseline), str(candidate)]) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "blocked"
+    assert report["diff"]["blocked"] == ["live_route"]
+
+
 def test_cli_diff_reports_invariant_changes(tmp_path: Path, capsys) -> None:
     baseline = tmp_path / "baseline.yaml"
     candidate = tmp_path / "candidate.yaml"

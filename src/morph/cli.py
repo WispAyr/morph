@@ -61,10 +61,29 @@ def _build_parser() -> argparse.ArgumentParser:
     validate_parser = subparsers.add_parser("validate", help="Check a MORPH YAML definition without evaluating it.")
     validate_parser.add_argument("source", help="Path to the YAML file to validate.")
 
+    inspect_parser = subparsers.add_parser("inspect", aliases=["explain"], help="Return a semantic summary of a MORPH system.")
+    inspect_parser.add_argument("source", help="Path to the YAML file to inspect.")
+    inspect_parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output.")
+
+    simulate_parser = subparsers.add_parser("simulate", help="Run a semantic safety simulation over example contexts.")
+    simulate_parser.add_argument("source", help="Path to the YAML file to simulate.")
+    simulate_parser.add_argument("--context", help="Path to a JSON/YAML file containing a single context object or a list of context objects.")
+    simulate_parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output.")
+
     diff_parser = subparsers.add_parser("diff", help="Compare two MORPH definitions and report semantic-preservation differences.")
     diff_parser.add_argument("baseline", help="Path to the original MORPH YAML file.")
     diff_parser.add_argument("candidate", help="Path to the proposed updated MORPH YAML file.")
     diff_parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output.")
+
+    impact_parser = subparsers.add_parser("impact", help="Explain what a semantic subject depends on and what it affects.")
+    impact_parser.add_argument("source", help="Path to the MORPH YAML file to inspect.")
+    impact_parser.add_argument("subject", help="Semantic subject or field path, for example ParkingSession.status.")
+    impact_parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output.")
+
+    plan_parser = subparsers.add_parser("plan", aliases=["review"], help="Review a proposed semantic mutation and report whether it is safe to accept.")
+    plan_parser.add_argument("baseline", help="Path to the original MORPH YAML file.")
+    plan_parser.add_argument("candidate", help="Path to the proposed updated MORPH YAML file.")
+    plan_parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output.")
 
     compile_parser = subparsers.add_parser("compile", help="Compile a MORPH YAML definition to a target backend.")
     compile_parser.add_argument("source", help="Path to the YAML file to compile.")
@@ -213,6 +232,38 @@ def _cmd_validate(source: str) -> int:
     return 0
 
 
+def _cmd_inspect(source: str, pretty: bool) -> int:
+    try:
+        definition = load_system_definition(Path(source))
+        print(json.dumps(definition.inspect(), indent=2 if pretty else None))
+        return 0
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        print(f"error: {exc}")
+        return 1
+
+
+def _cmd_simulate(source: str, context_path: str | None, pretty: bool) -> int:
+    try:
+        definition = load_system_definition(Path(source))
+        if context_path is None:
+            raise ValueError("--context is required for simulation")
+        payload = yaml.safe_load(Path(context_path).read_text(encoding="utf-8"))
+        if payload is None:
+            scenarios = []
+        elif isinstance(payload, list):
+            scenarios = payload
+        elif isinstance(payload, dict):
+            scenarios = [payload]
+        else:
+            raise ValueError("Simulation contexts must be a dict or list of dicts")
+        result = definition.simulate(scenarios)
+        print(json.dumps(result, indent=2 if pretty else None))
+        return 0 if not result["failed"] else 1
+    except (OSError, ValueError, TypeError, yaml.YAMLError) as exc:
+        print(f"error: {exc}")
+        return 1
+
+
 def _cmd_diff(baseline: str, candidate: str, pretty: bool) -> int:
     try:
         base_ir = load_system_definition(Path(baseline))
@@ -222,6 +273,29 @@ def _cmd_diff(baseline: str, candidate: str, pretty: bool) -> int:
             print(json.dumps(diff, indent=2 if pretty else None))
             return 1
         print(json.dumps(diff, indent=2 if pretty else None))
+        return 0
+    except (OSError, ValueError, TypeError, yaml.YAMLError) as exc:
+        print(f"error: {exc}")
+        return 1
+
+
+def _cmd_plan(baseline: str, candidate: str, pretty: bool) -> int:
+    try:
+        base_ir = load_system_definition(Path(baseline))
+        cand_ir = load_system_definition(Path(candidate))
+        review = base_ir.plan_change(cand_ir)
+        print(json.dumps(review, indent=2 if pretty else None))
+        return 1 if review["status"] == "blocked" else 0
+    except (OSError, ValueError, TypeError, yaml.YAMLError) as exc:
+        print(f"error: {exc}")
+        return 1
+
+
+def _cmd_impact(source: str, subject: str, pretty: bool) -> int:
+    try:
+        definition = load_system_definition(Path(source))
+        report = definition.impact(subject)
+        print(json.dumps(report, indent=2 if pretty else None))
         return 0
     except (OSError, ValueError, TypeError, yaml.YAMLError) as exc:
         print(f"error: {exc}")
@@ -321,8 +395,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "validate":
         return _cmd_validate(args.source)
 
+    if args.command in {"inspect", "explain"}:
+        return _cmd_inspect(args.source, args.pretty)
+
+    if args.command == "simulate":
+        return _cmd_simulate(args.source, args.context, args.pretty)
+
     if args.command == "diff":
         return _cmd_diff(args.baseline, args.candidate, args.pretty)
+
+    if args.command in {"plan", "review"}:
+        return _cmd_plan(args.baseline, args.candidate, args.pretty)
+
+    if args.command == "impact":
+        return _cmd_impact(args.source, args.subject, args.pretty)
 
     if args.command == "compile":
         return _cmd_compile(args.source, args.target, args.pretty)

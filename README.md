@@ -26,6 +26,8 @@ python -m pip install -e .[dev]
 pytest -q
 morph init demo.yaml
 morph validate demo.yaml
+morph inspect demo.yaml
+morph simulate demo.yaml --context scenarios.yaml
 morph diff baseline.yaml candidate.yaml
 morph run demo.yaml --set route.status=ready
 morph run demo.yaml --set route.status=ready --set route.locked=true --explain
@@ -144,7 +146,7 @@ morph system crosspoint.yaml --store events.jsonl history --kind transitioned
 - Capabilities resolve through `operator.capabilities` unless the definition declares the capability under `capabilities` with its own `requires` context paths.
 - Every entry point (runtime, planner, workflow, state machine, compiler, CLI) validates the definition before evaluating it. `morph validate` runs the same checks on their own, and `morph run --explain` shows how each policy fared.
 - Compiled plans carry each policy's normalised CEL condition and the entity schema, so the Python and Node targets reach the same decision as the runtime. The SQL target only translates structured clause lists, emits one parameterised statement per policy, and refuses `contains`.
-- The semantic model also supports `intent` and `invariants`. `morph diff baseline.yaml candidate.yaml` reports `preserved`, `added`, and `blocked` invariants so an AI change can be reviewed before it is accepted.
+- The semantic model also supports `intent` and `invariants`. `morph inspect` reports the system-level model, `morph simulate --context scenarios.yaml` checks invariants over example contexts, and `morph diff baseline.yaml candidate.yaml` reports `preserved`, `added`, and `blocked` invariants so an AI change can be reviewed before it is accepted.
 
 ```bash
 morph new my_service --template service
