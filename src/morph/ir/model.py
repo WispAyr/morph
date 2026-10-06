@@ -488,15 +488,19 @@ class MORPHIR:
 
         The relationship is about what the system allows: ``BROADER`` when the candidate allows
         more, ``NARROWER`` when it allows less, ``CONFLICTING`` when the two allow disjoint sets,
-        and ``EQUIVALENT`` when nothing observable changes. Everything other than policies and
-        invariants must be structurally identical. Changed policies are compared as a whole
-        first-match decision function, so reordering, shadowing, added and removed policies, and
-        deny versus allow are all accounted for. When a policy is gated by a capability grant,
-        which the reasoner cannot see, rewritten conditions are compared one policy at a time
-        instead, and that needs the same names, order, and results. A changed invariant
-        conjunction counts as broader when it permits more. Unchanged parts do not move the
-        result; any unproven comparison, or changes that pull in different directions, give
-        ``UNKNOWN``.
+        and ``EQUIVALENT`` when nothing observable changes.
+
+        Everything other than policies, invariants, and entities must be structurally identical.
+        Entities may only grow: a candidate may add entities and fields, and the two are then
+        compared over the candidate's inputs, which the baseline simply ignores. When policies
+        change, the result is the change in the decision function alone, compared as a whole
+        first-match function so reordering, shadowing, added and removed policies, and deny versus
+        allow are all accounted for; invariants are the specification, not behaviour, and are
+        checked separately. When a policy is gated by a capability grant, which the reasoner
+        cannot see, rewritten conditions are compared one policy at a time instead, and that
+        needs the same names, order, and results. Only when policies are unchanged does a changed
+        invariant conjunction decide the result. Any unproven comparison, or changes that pull in
+        different directions, give ``UNKNOWN``.
         """
         if not isinstance(candidate, MORPHIR):
             candidate = MORPHIR.from_dict(candidate)
@@ -510,10 +514,17 @@ class MORPHIR:
         right_policies = right.pop("policies")
         left_invariants = left.pop("invariants")
         right_invariants = right.pop("invariants")
+        left_entities = left.pop("entities")
+        right_entities = right.pop("entities")
         if left != right:
             return "UNKNOWN"
+        if left_entities == right_entities:
+            types = self._shared_semantic_types(self, candidate)
+        elif self._entities_only_grow(left_entities, right_entities):
+            types = self._shared_semantic_types(candidate, candidate)
+        else:
+            return "UNKNOWN"
 
-        types = self._shared_semantic_types(self, candidate)
         reasoner = SemanticReasoner()
         relationships: set[str] = set()
         if left_policies != right_policies:
@@ -528,7 +539,7 @@ class MORPHIR:
                 if per_policy is None:
                     return "UNKNOWN"
                 relationships |= per_policy
-        if left_invariants != right_invariants:
+        elif left_invariants != right_invariants:
             analysis = reasoner.analyze(
                 self._invariant_condition(left_invariants), self._invariant_condition(right_invariants), types=types,
             )
@@ -542,6 +553,23 @@ class MORPHIR:
         if len(changed) == 1:
             return changed.pop().upper()
         return "UNKNOWN"
+
+    @staticmethod
+    def _entities_only_grow(left: list[Any], right: list[Any]) -> bool:
+        """True when the candidate keeps every entity and field, with the same types, and only adds."""
+        if not all(isinstance(item, dict) and item.get("name") for item in left + right):
+            return False
+        candidate = {item["name"]: item for item in right}
+        for entity in left:
+            grown = candidate.get(entity["name"])
+            if grown is None:
+                return False
+            if {key: value for key, value in entity.items() if key != "fields"} != {key: value for key, value in grown.items() if key != "fields"}:
+                return False
+            fields, grown_fields = entity.get("fields") or {}, grown.get("fields") or {}
+            if any(grown_fields.get(name) != kind for name, kind in fields.items()):
+                return False
+        return True
 
     @staticmethod
     def _decision_terms(policies: list[Any]) -> list[tuple[Any, str, bool]] | None:

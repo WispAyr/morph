@@ -287,13 +287,28 @@ def test_classify_equivalence_is_unknown_when_a_policy_result_changes():
     assert baseline.classify_equivalence(candidate) == "UNKNOWN"
 
 
-def test_classify_equivalence_combines_policy_and_invariant_changes():
+def test_policy_changes_decide_the_classification_and_invariants_only_when_policies_are_unchanged():
     invariant = [{"name": "fast", "when": "source.latency_ms < 120"}]
     baseline = _classification_model([_policy("a", "source.latency_ms < 120")], invariant)
     broader_policy = _classification_model([_policy("a", "source.latency_ms < 200")], [{"name": "fast", "when": "source.latency_ms <= 119"}])
-    mixed = _classification_model([_policy("a", "source.latency_ms < 200")], [{"name": "fast", "when": "source.latency_ms < 60"}])
+    tighter_spec = _classification_model([_policy("a", "source.latency_ms < 200")], [{"name": "fast", "when": "source.latency_ms < 60"}])
+    invariant_only = _classification_model([_policy("a", "source.latency_ms < 120")], [{"name": "fast", "when": "source.latency_ms < 60"}])
     assert baseline.classify_equivalence(broader_policy) == "BROADER"
-    assert baseline.classify_equivalence(mixed) == "UNKNOWN"
+    # The invariants are the specification; what the system allows changed the same way.
+    assert baseline.classify_equivalence(tighter_spec) == "BROADER"
+    assert baseline.classify_equivalence(invariant_only) == "NARROWER"
+
+
+def test_a_candidate_that_only_adds_fields_is_compared_over_its_inputs():
+    baseline = _classification_model([_policy("a", "source.latency_ms < 120")])
+    data = copy.deepcopy(baseline.to_dict())
+    data["entities"][0]["fields"]["muted"] = "bool"
+    data["policies"].insert(0, {"name": "deny_muted", "when": "has(source.muted) && source.muted", "result": {"status": "deny", "action": "reject"}})
+    assert baseline.classify_equivalence(data) == "NARROWER"
+
+    retyped = copy.deepcopy(baseline.to_dict())
+    retyped["entities"][0]["fields"]["latency_ms"] = "double"
+    assert baseline.classify_equivalence(retyped) == "UNKNOWN"
 
 
 def test_score_runs_rejects_evaluations_without_a_run():
