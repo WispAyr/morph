@@ -262,10 +262,23 @@ def test_classify_equivalence_is_unknown_when_a_policy_is_removed():
     assert baseline.classify_equivalence(candidate) == "UNKNOWN"
 
 
-def test_classify_equivalence_is_unknown_when_policies_are_reordered():
+def test_reordering_policies_is_equivalent_only_when_no_decision_changes():
     first = _policy("a", "source.latency_ms < 120")
     second = _policy("b", "source.status == 'live'")
-    assert _classification_model([first, second]).classify_equivalence(_classification_model([second, first])) == "UNKNOWN"
+    assert _classification_model([first, second]).classify_equivalence(_classification_model([second, first])) == "EQUIVALENT"
+
+    deny = {"name": "deny_slow", "when": "source.latency_ms >= 100", "result": {"status": "deny", "action": "reject"}}
+    allow = _policy("allow_live", "source.status == 'live'")
+    # Moving the allow above the overlapping deny lets slow live sources through.
+    assert _classification_model([deny, allow]).classify_equivalence(_classification_model([allow, deny])) == "BROADER"
+
+
+def test_a_narrower_deny_classifies_as_broader():
+    deny = {"name": "deny_slow", "when": "source.latency_ms >= 100", "result": {"status": "deny", "action": "reject"}}
+    allow = _policy("allow_live", "source.status == 'live'")
+    relaxed = {**deny, "when": "source.latency_ms >= 150"}
+    assert _classification_model([deny, allow]).classify_equivalence(_classification_model([relaxed, allow])) == "BROADER"
+    assert _classification_model([relaxed, allow]).classify_equivalence(_classification_model([deny, allow])) == "NARROWER"
 
 
 def test_classify_equivalence_is_unknown_when_a_policy_result_changes():
@@ -355,3 +368,28 @@ def test_scorer_cli_scores_a_single_pilot_task_as_partial(tmp_path):
     assert pilot_only.returncode == 0, pilot_only.stderr
     result = json.loads(pilot_only.stdout)
     assert result["corpus"] == {"tasks": 1, "task_ids": [pilot], "development_fixtures": [], "partial": True}
+
+
+def test_reasoner_models_list_fields_exactly():
+    types = {"source.kind": "string", "destination.accepts": "list"}
+    reasoner = SemanticReasoner()
+
+    assert reasoner.analyze("source.kind in destination.accepts", "size(destination.accepts) > 0", types=types)["relationship"] == "broader"
+    assert reasoner.analyze("size(destination.accepts) == 0", "source.kind in destination.accepts", types=types)["relationship"] == "conflicting"
+    assert reasoner.analyze("source.kind in destination.accepts", 'source.kind == "camera"', types=types)["relationship"] == "unknown"
+
+
+def test_the_screen_accepts_change_classifies_as_broader():
+    path = Path(__file__).parents[1] / "src/morph/examples/crosspointd.yaml"
+    baseline = MORPHIR.from_dict(load_system_definition(path).to_dict())
+    data = copy.deepcopy(baseline.to_dict())
+    screen = next(policy for policy in data["policies"] if policy["name"] == "deny_screen_needs_layout")
+    screen["when"] += " && !(source.kind in destination.accepts)"
+    invariant = next(item for item in data["invariants"] if item["name"] == "screens_take_only_layouts")
+    invariant["when"] += " || source.kind in destination.accepts"
+
+    assert baseline.classify_equivalence(data) == "BROADER"
+    # Changing only the policy is broader too; the evaluator's simulation is what catches the stale invariant.
+    policy_only = copy.deepcopy(baseline.to_dict())
+    next(policy for policy in policy_only["policies"] if policy["name"] == "deny_screen_needs_layout")["when"] = screen["when"]
+    assert baseline.classify_equivalence(policy_only) == "BROADER"
