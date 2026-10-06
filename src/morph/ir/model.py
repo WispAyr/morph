@@ -486,12 +486,17 @@ class MORPHIR:
     def classify_equivalence(self, candidate: "MORPHIR | dict[str, Any]") -> str:
         """Return a conservative semantic classification of a candidate model.
 
-        Designed for AI review, not as a full theorem prover. Everything other than policy
-        conditions and invariant conditions must be structurally identical, and policies must
-        keep the same names, order, and results, because evaluation is first-match. The
-        invariant conjunction and each rewritten policy condition are then compared with the
-        reasoner. Unchanged parts do not move the result; any unproven comparison, or changes
-        that pull in different directions, give ``UNKNOWN``.
+        The relationship is about what the system allows: ``BROADER`` when the candidate allows
+        more, ``NARROWER`` when it allows less, ``CONFLICTING`` when the two allow disjoint sets,
+        and ``EQUIVALENT`` when nothing observable changes. Everything other than policies and
+        invariants must be structurally identical. Changed policies are compared as a whole
+        first-match decision function, so reordering, shadowing, added and removed policies, and
+        deny versus allow are all accounted for. When a policy is gated by a capability grant,
+        which the reasoner cannot see, rewritten conditions are compared one policy at a time
+        instead, and that needs the same names, order, and results. A changed invariant
+        conjunction counts as broader when it permits more. Unchanged parts do not move the
+        result; any unproven comparison, or changes that pull in different directions, give
+        ``UNKNOWN``.
         """
         if not isinstance(candidate, MORPHIR):
             candidate = MORPHIR.from_dict(candidate)
@@ -507,33 +512,26 @@ class MORPHIR:
         right_invariants = right.pop("invariants")
         if left != right:
             return "UNKNOWN"
-        if len(left_policies) != len(right_policies):
-            return "UNKNOWN"
 
         types = self._shared_semantic_types(self, candidate)
-        comparisons: list[tuple[Any, Any]] = []
-        names: set[Any] = set()
-        for before, after in zip(left_policies, right_policies):
-            if not isinstance(before, dict) or not isinstance(after, dict):
-                if before != after:
-                    return "UNKNOWN"
-                continue
-            if before.get("name") != after.get("name") or before.get("name") in names:
-                return "UNKNOWN"
-            names.add(before.get("name"))
-            if before == after:
-                continue
-            before_rest = {key: value for key, value in before.items() if key != "when"}
-            after_rest = {key: value for key, value in after.items() if key != "when"}
-            if before_rest != after_rest:
-                return "UNKNOWN"
-            comparisons.append((before.get("when"), after.get("when")))
-        if left_invariants != right_invariants:
-            comparisons.append((self._invariant_condition(left_invariants), self._invariant_condition(right_invariants)))
-
+        reasoner = SemanticReasoner()
         relationships: set[str] = set()
-        for before_when, after_when in comparisons:
-            analysis = SemanticReasoner().analyze(when_to_cel(before_when), when_to_cel(after_when), types=types)
+        if left_policies != right_policies:
+            decisions = [self._decision_terms(policies) for policies in (left_policies, right_policies)]
+            if decisions[0] is not None and decisions[1] is not None:
+                analysis = reasoner.analyze_decisions(decisions[0], decisions[1], types=types)
+                if analysis["confidence"] != "proven":
+                    return "UNKNOWN"
+                relationships.add(analysis["relationship"])
+            else:
+                per_policy = self._policy_relationships(left_policies, right_policies, types)
+                if per_policy is None:
+                    return "UNKNOWN"
+                relationships |= per_policy
+        if left_invariants != right_invariants:
+            analysis = reasoner.analyze(
+                self._invariant_condition(left_invariants), self._invariant_condition(right_invariants), types=types,
+            )
             if analysis["confidence"] != "proven":
                 return "UNKNOWN"
             relationships.add(analysis["relationship"])
@@ -544,6 +542,47 @@ class MORPHIR:
         if len(changed) == 1:
             return changed.pop().upper()
         return "UNKNOWN"
+
+    @staticmethod
+    def _decision_terms(policies: list[Any]) -> list[tuple[Any, str, bool]] | None:
+        """Policies as (condition, outcome, allows) for the reasoner, or None when it cannot model them."""
+        terms = []
+        for policy in policies:
+            if not isinstance(policy, dict) or not isinstance(policy.get("result"), dict) or policy.get("requires"):
+                return None
+            result = policy["result"]
+            terms.append((policy.get("when"), json.dumps(result, sort_keys=True), result.get("status") == "allow"))
+        return terms
+
+    @staticmethod
+    def _policy_relationships(left_policies: list[Any], right_policies: list[Any], types: dict[str, str]) -> set[str] | None:
+        """Relate rewritten conditions one policy at a time, or None when the policies are not comparable."""
+        if len(left_policies) != len(right_policies):
+            return None
+        flipped = {"broader": "narrower", "narrower": "broader"}
+        relationships: set[str] = set()
+        names: set[Any] = set()
+        for before, after in zip(left_policies, right_policies):
+            if not isinstance(before, dict) or not isinstance(after, dict):
+                if before != after:
+                    return None
+                continue
+            if before.get("name") != after.get("name") or before.get("name") in names:
+                return None
+            names.add(before.get("name"))
+            if before == after:
+                continue
+            if {key: value for key, value in before.items() if key != "when"} != {key: value for key, value in after.items() if key != "when"}:
+                return None
+            analysis = SemanticReasoner().analyze(when_to_cel(before.get("when")), when_to_cel(after.get("when")), types=types)
+            if analysis["confidence"] != "proven":
+                return None
+            relationship = analysis["relationship"]
+            # A deny that matches more allows less.
+            if isinstance(before.get("result"), dict) and before["result"].get("status") == "deny":
+                relationship = flipped.get(relationship, relationship)
+            relationships.add(relationship)
+        return relationships
 
     def semantic_equivalence(self, candidate: "MORPHIR | dict[str, Any]") -> bool:
         """Alias for equivalent_to()."""
