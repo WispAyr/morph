@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -41,6 +42,19 @@ def finalize_pair(
     if not isinstance(task_id, str) or not isinstance(pair_id, str):
         raise ValueError("pair artifact must declare task_id and pair_id")
 
+    corpus = _read_json(REPO_ROOT / "benchmarks/agent-study/corpus.json")
+    if not isinstance(corpus, dict) or not isinstance(corpus.get("tasks"), list):
+        raise ValueError("corpus.tasks must be a list")
+    task_entry = next((item for item in corpus["tasks"] if item.get("task_id") == task_id), None)
+    if task_entry is None:
+        raise ValueError(f"unknown task '{task_id}'")
+    if pair.get("evaluation_status") != task_entry.get("evaluation_status"):
+        raise ValueError("pair evaluation_status does not match the current corpus")
+    if pair.get("prompt_sha256") != hashlib.sha256((REPO_ROOT / task_entry["prompt"]).read_bytes()).hexdigest():
+        raise ValueError("pair prompt hash does not match the current corpus prompt")
+    if pair.get("arm_order") not in (list(ARMS), list(reversed(ARMS))):
+        raise ValueError("pair arm_order must contain both arms exactly once")
+
     records = []
     for arm in ARMS:
         run = pair["runs"][arm]
@@ -54,15 +68,16 @@ def finalize_pair(
         if invariants not in INVARIANT_STATUSES:
             raise ValueError(f"{arm}.invariants_status must be one of {sorted(INVARIANT_STATUSES)}")
 
-        task = run.get("pre_implementation")
-        analysis = task.get("analysis") if isinstance(task, dict) else None
+        frozen = run.get("pre_implementation")
+        analysis = frozen.get("analysis") if isinstance(frozen, dict) else None
         if not isinstance(analysis, dict):
             raise ValueError(f"{arm} has no frozen analysis artifact")
-        task_definition = REPO_ROOT / "benchmarks/agent-study/corpus.json"
-        corpus = _read_json(task_definition)
-        task_entry = next((item for item in corpus["tasks"] if item["task_id"] == task_id), None)
-        if task_entry is None:
-            raise ValueError(f"unknown task '{task_id}'")
+        canonical_artifact = json.dumps(frozen, indent=2, sort_keys=True) + "\n"
+        artifact_hash = hashlib.sha256(canonical_artifact.encode("utf-8")).hexdigest()
+        if artifact_hash != run.get("pre_implementation_sha256"):
+            raise ValueError(f"{arm} frozen pre-implementation artifact hash does not match")
+        if run.get("baseline_commit") != task_entry["baseline_commit"]:
+            raise ValueError(f"{arm} baseline commit does not match the corpus")
         if task_entry.get("evaluation_status") != "frozen" and not allow_development_fixtures:
             raise ValueError(f"task '{task_id}' is a development fixture")
         workspace = Path(run["workspace"]).resolve()
@@ -91,9 +106,9 @@ def finalize_pair(
             "pair_id": pair_id,
             "arm": arm,
             "agent": agent,
-            "pre_implementation_understanding": task["understanding"],
-            "semantic_proposal": task["semantic_proposal"],
-            "morph_analysis": task["morph_analysis"],
+            "pre_implementation_understanding": frozen["understanding"],
+            "semantic_proposal": frozen["semantic_proposal"],
+            "morph_analysis": frozen["morph_analysis"],
             "analysis": analysis,
             "patch": run.get("patch", ""),
             "judge": {
