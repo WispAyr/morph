@@ -1,0 +1,139 @@
+name: crosspointd-rules
+version: 0.1.0
+description: >-
+  One tick of the Crosspoint rules engine (crosspointd Core.runRules) for one rule and its
+  destination: send a take or release, or hold with a status saying why. Every scenario in
+  tests/fixtures/crosspointd_rule_decisions.jsonl.gz, recorded from crosspointd itself, must
+  reach the same decision here. Commands are allow decisions; a status without a command is a
+  deny whose reason is the status kind. Both carry the status level crosspointd shows.
+
+entities:
+  - name: rule
+    fields:
+      id: string
+      enabled: bool
+      policy: string             # if-free: never displace a live source this rule did not put there; replace
+      release: bool              # release the destination when no matching source is left
+  - name: destination
+    fields:
+      id: string
+      registered: bool
+      offline: bool              # its owner disconnected
+      peer: bool                 # imported from a peer node; rules may only target local destinations
+      operator_only: bool        # its own operator decides; rules never target it
+      on_air: bool               # the derived lock: on programme by the owner's flag or a switcher's tally
+      command_in_flight: bool
+      current: string            # none | candidate | other: what the destination shows now
+  - name: candidate
+    fields:
+      id: string
+      present: bool              # a live source matches the rule and the destination accepts it (with pull granted if imported)
+  - name: current_source
+    fields:
+      live: bool                 # the source the destination shows is live (only when current is other)
+  - name: route
+    fields:
+      mine: bool                 # this rule made the destination's current route
+  - name: retry
+    fields:
+      take_failed_recently: bool     # a take of this candidate failed within the retry interval
+      release_failed_recently: bool  # a release failed within the retry interval
+
+capabilities:
+  route_command:
+    description: Send a take or release command to the destination's owner.
+    requires: []
+    inputs: {command: string, destination: string, source: string}
+    outputs: {}
+    failures: [owner_disconnected, refused, timeout]
+    retries: 0
+
+actions:
+  take:
+    capability: route_command
+    inputs: {command: '"take"', destination: destination.id, source: candidate.id}
+  release:
+    capability: route_command
+    inputs: {command: '"release"', destination: destination.id, source: '""'}
+
+# A command is sent only when no earlier policy holds the rule. The candidate is the
+# oldest-matching live source; selecting it is not part of this decision.
+invariants:
+  - name: never_touches_an_on_air_destination
+    when: decision.status != "allow" || !destination.on_air
+  - name: never_targets_peer_or_operator_only_destinations
+    when: decision.status != "allow" || (!destination.peer && !destination.operator_only)
+  - name: commands_only_reach_registered_online_destinations
+    when: decision.status != "allow" || (destination.registered && !destination.offline)
+  - name: disabled_rules_do_nothing
+    when: decision.status != "allow" || rule.enabled
+  - name: one_command_at_a_time
+    when: decision.status != "allow" || !destination.command_in_flight
+  - name: if_free_never_displaces_a_live_source
+    when: >-
+      decision.action != "take" || rule.policy != "if-free" || destination.current != "other"
+      || !current_source.live || route.mine
+  - name: releases_only_its_own_route
+    when: decision.action != "release" || (route.mine && rule.release && !candidate.present)
+  - name: failed_commands_wait_before_retrying
+    when: >-
+      (decision.action != "take" || !retry.take_failed_recently)
+      && (decision.action != "release" || !retry.release_failed_recently)
+
+policies:
+  - name: disabled
+    when: '!rule.enabled'
+    result: {status: deny, action: hold, reason: disabled, level: info}
+  - name: peer_destination
+    when: destination.registered && destination.peer
+    result: {status: deny, action: hold, reason: peer_destination, level: warn}
+  - name: destination_unavailable
+    when: '!destination.registered || destination.offline'
+    result: {status: deny, action: hold, reason: destination_unavailable, level: warn}
+  - name: operator_only
+    when: destination.operator_only
+    result: {status: deny, action: hold, reason: operator_only, level: warn}
+
+  # On air: never touch it. Say what is waiting, if anything.
+  - name: release_waiting_on_air
+    when: destination.on_air && !candidate.present && route.mine && rule.release
+    result: {status: deny, action: hold, reason: release_waiting_on_air, level: warn}
+  - name: queued_on_air
+    when: destination.on_air && candidate.present && destination.current != "candidate"
+    result: {status: deny, action: hold, reason: queued_on_air, level: warn}
+  - name: on_air_routed
+    when: destination.on_air && candidate.present
+    result: {status: deny, action: hold, reason: on_air_routed, level: ok}
+  - name: on_air_idle
+    when: destination.on_air
+    result: {status: deny, action: hold, reason: on_air_idle, level: ok}
+
+  - name: in_flight
+    when: destination.command_in_flight
+    result: {status: deny, action: hold, reason: in_flight, level: info}
+
+  - name: already_routed
+    when: candidate.present && destination.current == "candidate"
+    result: {status: deny, action: hold, reason: already_routed, level: ok}
+  - name: busy
+    when: >-
+      candidate.present && rule.policy == "if-free" && destination.current == "other"
+      && current_source.live && !route.mine
+    result: {status: deny, action: hold, reason: busy, level: info}
+  - name: take_retrying
+    when: candidate.present && retry.take_failed_recently
+    result: {status: deny, action: hold, reason: take_retrying, level: warn}
+  - name: take
+    when: candidate.present
+    result: {status: allow, action: take, level: info}
+
+  - name: release_retrying
+    when: route.mine && rule.release && retry.release_failed_recently
+    result: {status: deny, action: hold, reason: release_retrying, level: warn}
+  - name: release
+    when: route.mine && rule.release
+    result: {status: allow, action: release, level: info}
+
+  - name: idle_no_source
+    when: "true"
+    result: {status: deny, action: hold, reason: idle_no_source, level: ok}
