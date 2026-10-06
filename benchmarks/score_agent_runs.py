@@ -18,7 +18,9 @@ METRICS = (
     "impact_f1",
     "relationship_correct",
     "implementation_complete",
+    "structural_passed",
     "tests_passed",
+    "semantic_relationship_correct",
     "simulation_passed",
     "task_cases_passed",
 )
@@ -82,9 +84,11 @@ def score_runs(runs: list[dict[str, Any]], reference: dict[str, Any], evaluation
             raise ValueError(f"evaluations[{index}] must declare pair_id and arm")
         if key in evaluation_by_key:
             raise ValueError(f"duplicate evaluation for {key[0]} / {key[1]}")
-        for field in ("implementation_complete", "tests_passed", "simulation_passed", "task_cases_passed"):
+        for field in ("implementation_complete", "structural_passed", "tests_passed", "simulation_passed", "task_cases_passed"):
             if not isinstance(evaluation.get(field), bool):
                 raise ValueError(f"evaluations[{index}].{field} must be Boolean")
+        if evaluation.get("semantic_relationship") not in RELATIONSHIPS:
+            raise ValueError(f"evaluations[{index}].semantic_relationship is invalid")
         if evaluation.get("invariants_status") not in INVARIANT_STATUSES:
             raise ValueError(f"evaluations[{index}].invariants_status is invalid")
         evaluation_by_key[key] = evaluation
@@ -121,6 +125,8 @@ def score_runs(runs: list[dict[str, Any]], reference: dict[str, Any], evaluation
             "relationship_correct": analysis["relationship"] == expected_relationship,
             "unknown_overclaim": expected_relationship == "unknown" and analysis["relationship"] != "unknown",
             "implementation_complete": evaluation["implementation_complete"],
+            "structural_passed": evaluation["structural_passed"],
+            "semantic_relationship_correct": evaluation["semantic_relationship"] == expected_relationship,
             "tests_passed": evaluation["tests_passed"],
             "simulation_passed": evaluation["simulation_passed"],
             "task_cases_passed": evaluation["task_cases_passed"],
