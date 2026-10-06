@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Any
 
 PROVIDER = "anthropic"
-RELATIONSHIPS = ["equivalent", "narrower", "broader", "conflicting", "unknown"]
+RELATIONSHIPS = ["equivalent", "narrower", "broader", "overlapping", "conflicting", "unknown"]
 # Subjects use the same kind:name vocabulary as the evaluator's labels, so impact scores measure understanding, not naming.
 SUBJECT_PATTERN = r"^(policy|invariant|action|capability|entity|field|transition):[A-Za-z0-9_.\-]+$"
 
@@ -74,7 +74,7 @@ ANALYSIS_SCHEMA = {
                 },
                 "relationship": {
                     "enum": RELATIONSHIPS,
-                    "description": "How the set of requests the system allows changes: broader if it allows more, narrower if fewer, equivalent if the same, conflicting if disjoint, unknown if you cannot tell.",
+                    "description": "How the set of requests the system allows changes: broader if it allows everything it did and more, narrower if only some of what it did, equivalent if the same, overlapping if it allows some new requests and refuses some it allowed, conflicting if the old and new sets are disjoint, unknown if you cannot tell.",
                 },
                 "test_scenarios": {"type": "array", "items": {"type": "string"}},
                 "unresolved_questions": {"type": "array", "items": {"type": "string"}},

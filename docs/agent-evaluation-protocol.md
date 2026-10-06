@@ -220,7 +220,7 @@ For each arm and across paired tasks, report:
 - Precision and recall of affected-subject predictions against a human-authored reference.
 - Invariant regressions, including regressions found only by hidden tests or MORPH checks.
 - UNKNOWN rate and the number of UNKNOWN results that agents incorrectly report as safe.
-- Proposal relationship accuracy: equivalent, narrower, broader, conflicting, or UNKNOWN.
+- Proposal relationship accuracy: equivalent, narrower, broader, overlapping (each side allows something the other does not), conflicting (disjoint), or UNKNOWN.
 - Simulation failures found before implementation and after implementation.
 - Human interventions, elapsed time, and token/tool budget.
 - Implementation-equivalence failures between MORPH behavior and code behavior.

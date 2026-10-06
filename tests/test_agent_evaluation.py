@@ -256,10 +256,29 @@ def _policy(name, when, action="ok"):
     return {"name": name, "when": when, "result": {"status": "allow", "action": action}}
 
 
-def test_classify_equivalence_is_unknown_when_a_policy_is_removed():
+def test_removing_one_policy_and_widening_another_is_overlapping():
     baseline = _classification_model([_policy("a", "source.latency_ms < 120"), _policy("b", "source.status == 'live'")])
     candidate = _classification_model([_policy("a", "source.latency_ms < 200")])
-    assert baseline.classify_equivalence(candidate) == "UNKNOWN"
+    # Slow live sources are no longer allowed and offline sources under 200 ms now are: each side allows something new.
+    assert baseline.classify_equivalence(candidate) == "OVERLAPPING"
+    assert baseline.propose(candidate)["proposal"] is not None
+
+
+def test_a_candidate_may_add_actions_and_capabilities_and_is_compared_by_its_decisions():
+    capability = {"description": "Route.", "requires": [], "inputs": {}, "outputs": {}, "failures": []}
+    data = _classification_model([_policy("a", "source.latency_ms < 120", action="route")]).to_dict()
+    data["capabilities"] = {"route": capability}
+    data["actions"] = {"route": {"capability": "route", "inputs": {}}}
+    baseline = MORPHIR.from_dict(data)
+    grown = copy.deepcopy(data)
+    grown["capabilities"]["notify"] = {**capability, "description": "Tell someone."}
+    grown["actions"]["notify"] = {"capability": "notify", "inputs": {}}
+    grown["policies"].append(_policy("b", "source.status == 'live'", action="notify"))
+    assert baseline.classify_equivalence(grown) == "BROADER"
+
+    changed = copy.deepcopy(grown)
+    changed["capabilities"]["route"] = {**capability, "description": "changed"}
+    assert baseline.classify_equivalence(changed) == "UNKNOWN", "changing an existing capability is not additive"
 
 
 def test_reordering_policies_is_equivalent_only_when_no_decision_changes():
@@ -391,7 +410,8 @@ def test_reasoner_models_list_fields_exactly():
 
     assert reasoner.analyze("source.kind in destination.accepts", "size(destination.accepts) > 0", types=types)["relationship"] == "broader"
     assert reasoner.analyze("size(destination.accepts) == 0", "source.kind in destination.accepts", types=types)["relationship"] == "conflicting"
-    assert reasoner.analyze("source.kind in destination.accepts", 'source.kind == "camera"', types=types)["relationship"] == "unknown"
+    overlap = reasoner.analyze("source.kind in destination.accepts", 'source.kind == "camera"', types=types)
+    assert overlap["relationship"] == "overlapping" and overlap["confidence"] == "proven"
 
 
 def test_the_screen_accepts_change_classifies_as_broader():

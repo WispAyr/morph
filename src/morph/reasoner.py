@@ -352,9 +352,9 @@ class SemanticReasoner:
         if overlap == "unsat":
             return {"relationship": "conflicting", "confidence": "proven", "reason": "no typed input satisfies both predicates"}
         return {
-            "relationship": "unknown",
-            "confidence": "unknown",
-            "reason": "the predicates overlap but neither implies the other",
+            "relationship": "overlapping",
+            "confidence": "proven",
+            "reason": "each predicate admits cases the other does not, and some cases satisfy both",
         }
 
     @staticmethod

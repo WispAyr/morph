@@ -551,12 +551,15 @@ class MORPHIR:
         """Return a conservative semantic classification of a candidate model.
 
         The relationship is about what the system allows: ``BROADER`` when the candidate allows
-        more, ``NARROWER`` when it allows less, ``CONFLICTING`` when the two allow disjoint sets,
-        and ``EQUIVALENT`` when nothing observable changes.
+        more, ``NARROWER`` when it allows less, ``OVERLAPPING`` when each allows something the other
+        does not, ``CONFLICTING`` when the two allow disjoint sets, and ``EQUIVALENT`` when nothing
+        observable changes.
 
-        Everything other than policies, invariants, and entities must be structurally identical.
-        Entities may only grow: a candidate may add entities and fields, and the two are then
-        compared over the candidate's inputs, which the baseline simply ignores. When policies
+        Everything other than policies, invariants, entities, capabilities, and actions must be
+        structurally identical. Entities may only grow: a candidate may add entities and fields, and
+        the two are then compared over the candidate's inputs, which the baseline simply ignores.
+        Capabilities and actions may also only grow: new ones change nothing until a policy uses
+        them, and the decision function accounts for that. When policies
         change, the result is the change in the decision function alone, compared as a whole
         first-match function so reordering, shadowing, added and removed policies, and deny versus
         allow are all accounted for; invariants are the specification, not behaviour, and are
@@ -580,6 +583,9 @@ class MORPHIR:
         right_invariants = right.pop("invariants")
         left_entities = left.pop("entities")
         right_entities = right.pop("entities")
+        for key in ("capabilities", "actions"):
+            if not self._only_adds(left.pop(key), right.pop(key)):
+                return "UNKNOWN"
         if left != right:
             return "UNKNOWN"
         if left_entities == right_entities:
@@ -617,6 +623,20 @@ class MORPHIR:
         if len(changed) == 1:
             return changed.pop().upper()
         return "UNKNOWN"
+
+    @staticmethod
+    def _only_adds(left: Any, right: Any) -> bool:
+        """True when the candidate keeps every named item exactly as it was and only adds new ones."""
+        def named(items: Any) -> dict[str, Any] | None:
+            if isinstance(items, dict):
+                return items
+            if isinstance(items, list) and all(isinstance(item, dict) and item.get("name") for item in items):
+                return {item["name"]: item for item in items}
+            return None
+        before, after = named(left or {}), named(right or {})
+        if before is None or after is None:
+            return left == right
+        return all(name in after and after[name] == item for name, item in before.items())
 
     @staticmethod
     def _entities_only_grow(left: list[Any], right: list[Any]) -> bool:
@@ -691,7 +711,7 @@ class MORPHIR:
         status = "safe_to_review"
         if diff["blocked"]:
             status = "blocked"
-        elif classification in {"CONFLICTING", "UNKNOWN"}:
+        elif classification in {"CONFLICTING", "OVERLAPPING", "UNKNOWN"}:
             status = "needs_review"
 
         proposal = {

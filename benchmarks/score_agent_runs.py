@@ -10,7 +10,7 @@ from statistics import fmean
 from typing import Any
 
 ARMS = {"direct_source", "morph_mediated"}
-RELATIONSHIPS = {"equivalent", "narrower", "broader", "conflicting", "unknown"}
+RELATIONSHIPS = {"equivalent", "narrower", "broader", "overlapping", "conflicting", "unknown"}
 INVARIANT_STATUSES = {"pass", "fail", "unknown", "not_applicable"}
 METRICS = (
     "impact_precision",
