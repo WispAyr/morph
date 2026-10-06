@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 from statistics import fmean
 from typing import Any
@@ -19,6 +20,7 @@ METRICS = (
     "implementation_complete",
     "tests_passed",
     "simulation_passed",
+    "task_cases_passed",
 )
 
 
@@ -63,6 +65,8 @@ def _impact_scores(predicted: set[str], expected: set[str]) -> tuple[float, floa
 
 
 def score_runs(runs: list[dict[str, Any]], reference: dict[str, Any], evaluations: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    if not isinstance(reference, dict):
+        raise ValueError("reference must be a JSON object")
     tasks = reference.get("tasks")
     if not isinstance(tasks, dict) or not tasks:
         raise ValueError("reference.tasks must be a non-empty object keyed by task_id")
@@ -78,7 +82,7 @@ def score_runs(runs: list[dict[str, Any]], reference: dict[str, Any], evaluation
             raise ValueError(f"evaluations[{index}] must declare pair_id and arm")
         if key in evaluation_by_key:
             raise ValueError(f"duplicate evaluation for {key[0]} / {key[1]}")
-        for field in ("implementation_complete", "tests_passed", "simulation_passed"):
+        for field in ("implementation_complete", "tests_passed", "simulation_passed", "task_cases_passed"):
             if not isinstance(evaluation.get(field), bool):
                 raise ValueError(f"evaluations[{index}].{field} must be Boolean")
         if evaluation.get("invariants_status") not in INVARIANT_STATUSES:
@@ -117,6 +121,7 @@ def score_runs(runs: list[dict[str, Any]], reference: dict[str, Any], evaluation
             "implementation_complete": evaluation["implementation_complete"],
             "tests_passed": evaluation["tests_passed"],
             "simulation_passed": evaluation["simulation_passed"],
+            "task_cases_passed": evaluation["task_cases_passed"],
             "invariants_status": evaluation["invariants_status"],
             "human_interventions": run["human_interventions"],
             "elapsed_seconds": run["elapsed_seconds"],
@@ -164,6 +169,55 @@ def score_runs(runs: list[dict[str, Any]], reference: dict[str, Any], evaluation
     return {"runs": evaluated, "by_arm": aggregates, "mean_paired_deltas_morph_minus_direct": paired_deltas}
 
 
+def _validate_corpus(corpus: Any, reference: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    if not isinstance(corpus, dict) or corpus.get("schema_version") != 1:
+        raise ValueError("corpus.schema_version must be 1")
+    if not isinstance(reference, dict):
+        raise ValueError("reference must be a JSON object")
+    entries = corpus.get("tasks")
+    if not isinstance(entries, list) or not entries:
+        raise ValueError("corpus.tasks must be a non-empty list")
+
+    indexed: dict[str, dict[str, Any]] = {}
+    for index, task in enumerate(entries):
+        label = f"corpus.tasks[{index}]"
+        if not isinstance(task, dict):
+            raise ValueError(f"{label} must be an object")
+        task_id = task.get("task_id")
+        if not isinstance(task_id, str) or not task_id:
+            raise ValueError(f"{label}.task_id must be a non-empty string")
+        if task_id in indexed:
+            raise ValueError(f"corpus contains duplicate task_id '{task_id}'")
+        for key in ("category", "difficulty", "prompt", "baseline_definition"):
+            if not isinstance(task.get(key), str) or not task[key]:
+                raise ValueError(f"{label}.{key} must be a non-empty string")
+        if task.get("evaluation_status") not in {"development_fixture", "frozen"}:
+            raise ValueError(f"{label}.evaluation_status must be 'development_fixture' or 'frozen'")
+        commit = task.get("baseline_commit")
+        if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
+            raise ValueError(f"{label}.baseline_commit must be a full lowercase Git commit SHA")
+        boundary = task.get("implementation_boundary")
+        if not isinstance(boundary, list) or not boundary or not all(isinstance(item, str) and item for item in boundary):
+            raise ValueError(f"{label}.implementation_boundary must be a non-empty list of paths")
+        indexed[task_id] = task
+
+    reference_tasks = reference.get("tasks")
+    if not isinstance(reference_tasks, dict):
+        raise ValueError("reference.tasks must be an object keyed by task_id")
+    if set(indexed) != set(reference_tasks):
+        missing = sorted(set(indexed) - set(reference_tasks))
+        extra = sorted(set(reference_tasks) - set(indexed))
+        raise ValueError(f"corpus/reference task ids differ (missing reference: {missing}; missing corpus: {extra})")
+    for task_id, task in indexed.items():
+        label = f"corpus task '{task_id}'"
+        reference_task = reference_tasks[task_id]
+        if not isinstance(reference_task, dict):
+            raise ValueError(f"reference task '{task_id}' must be an object")
+        if reference_task.get("category") != task["category"]:
+            raise ValueError(f"{label} category does not match the reference")
+    return indexed
+
+
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     runs = []
     for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
@@ -176,17 +230,55 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     return runs
 
 
+def _read_corpus(path: Path, reference: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    try:
+        corpus = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{path}:{exc.lineno}:{exc.colno}: invalid JSON: {exc.msg}") from exc
+    tasks = _validate_corpus(corpus, reference)
+    repo_root = path.resolve().parents[2]
+    for task_id, task in tasks.items():
+        paths = [task["prompt"], task["baseline_definition"], *task["implementation_boundary"]]
+        for relative in paths:
+            candidate = (repo_root / relative).resolve()
+            if repo_root not in candidate.parents or not candidate.is_file():
+                raise ValueError(f"corpus task '{task_id}' references missing or unsafe path '{relative}'")
+    return tasks
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("runs", type=Path, help="JSON Lines file containing paired agent run records")
     parser.add_argument("--reference", type=Path, required=True, help="JSON reference labels keyed by task_id")
     parser.add_argument("--evaluations", type=Path, required=True, help="JSON Lines produced by the independent evaluator")
+    parser.add_argument("--corpus", type=Path, required=True, help="Versioned task corpus index to validate against")
+    parser.add_argument("--allow-development-fixtures", action="store_true", help="Allow explicitly marked fixtures; results are not benchmark evidence")
     parser.add_argument("--pretty", action="store_true")
     args = parser.parse_args()
 
     try:
         reference = json.loads(args.reference.read_text(encoding="utf-8"))
-        result = score_runs(_read_jsonl(args.runs), reference, _read_jsonl(args.evaluations))
+        corpus_tasks = _read_corpus(args.corpus, reference)
+        fixture_tasks = sorted(
+            task_id for task_id, task in corpus_tasks.items()
+            if task["evaluation_status"] == "development_fixture"
+        )
+        if fixture_tasks and not args.allow_development_fixtures:
+            raise ValueError(
+                f"corpus contains development fixtures {fixture_tasks}; pass --allow-development-fixtures for local validation only"
+            )
+        runs = _read_jsonl(args.runs)
+        result = score_runs(runs, reference, _read_jsonl(args.evaluations))
+        covered = {run.get("task_id") for run in runs if isinstance(run, dict)}
+        if covered != set(corpus_tasks):
+            missing = sorted(set(corpus_tasks) - covered)
+            extra = sorted(covered - set(corpus_tasks))
+            raise ValueError(f"run task coverage does not match corpus (missing: {missing}; extra: {extra})")
+        result["corpus"] = {
+            "tasks": len(corpus_tasks),
+            "task_ids": sorted(corpus_tasks),
+            "development_fixtures": fixture_tasks,
+        }
     except (OSError, ValueError, TypeError) as exc:
         parser.error(str(exc))
     print(json.dumps(result, indent=2 if args.pretty else None))

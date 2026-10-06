@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "tasks": [
+    {
+      "task_id": "crosspoint-source-latency-150",
+      "category": "broadening",
+      "evaluation_status": "development_fixture",
+      "difficulty": "easy",
+      "baseline_commit": "8da64654af80a3521138a88d74b7e7b8df138eed",
+      "prompt": "benchmarks/agent-study/pilot-crosspoint-latency.md",
+      "baseline_definition": "src/morph/examples/crosspoint.yaml",
+      "implementation_boundary": [
+        "src/morph/examples/crosspoint.yaml",
+        "tests/test_crosspoint_route_policy.py"
+      ]
+    },
+    {
+      "task_id": "crosspoint-route-success-from-idle",
+      "category": "state_transition",
+      "evaluation_status": "development_fixture",
+      "difficulty": "medium",
+      "baseline_commit": "8da64654af80a3521138a88d74b7e7b8df138eed",
+      "prompt": "benchmarks/agent-study/task-crosspoint-transition-scope.md",
+      "baseline_definition": "src/morph/examples/crosspoint.yaml",
+      "implementation_boundary": [
+        "src/morph/examples/crosspoint.yaml",
+        "tests/test_system.py"
+      ]
+    }
+  ]
+}

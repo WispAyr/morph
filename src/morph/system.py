@@ -95,6 +95,10 @@ class MORPHSystem:
         if not self.schema.empty and entity not in self.schema.entities:
             raise ValueError(f"unknown entity '{entity}' (known: {sorted(self.schema.entities)})")
         payload = {**(fields or {}), **more}
+        if "id" in payload and payload["id"] != entity_id:
+            raise ValueError(
+                f"observation id '{payload['id']}' does not match entity instance id '{entity_id}'"
+            )
         if STATE_FIELD in payload and self.schema.entities.get(entity, EntityType(entity)).stateful:
             raise ValueError(f"'{STATE_FIELD}' is owned by the state machine of '{entity}'; it cannot be observed")
         errors = self.schema.validate_context({entity: {**payload, "id": entity_id}})
@@ -148,7 +152,9 @@ class MORPHSystem:
             context = self.context(**bindings)
         decision, decision_event = self._record_decision(context)
         result = self.executor.execute(decision, context)
-        if result.action is not None:
+        # An unbound decision named an action with no binding, so nothing ran and there is
+        # no outcome for a state machine to react to. The effect log still records it.
+        if result.action is not None and result.status != "unbound":
             outcome = {"executed": "succeeded", "skipped": "skipped", "failed": "failed", "denied": "denied"}[result.status]
             event_payload = {
                 "kind": f"{result.action}.{outcome}",
@@ -229,14 +235,12 @@ class MORPHSystem:
         """
         if entity is None and entity_id is not None:
             raise ValueError("entity_id requires entity")
-        if entity is not None and entity_id is None:
-            stream = stream_for(entity, "*")
-            events = self.store.events(after=after, kinds=kinds)
-            if entity is not None:
-                events = [event for event in events if event.stream.startswith(f"{entity}/")]
-            return [event.to_dict() for event in events]
         if entity is None:
             return [event.to_dict() for event in self.store.events(after=after, kinds=kinds)]
+        if entity_id is None:
+            prefix = f"{entity}/"
+            events = self.store.events(after=after, kinds=kinds)
+            return [event.to_dict() for event in events if event.stream.startswith(prefix)]
         stream = stream_for(entity, entity_id)
         return [event.to_dict() for event in self.store.events(stream=stream, after=after, kinds=kinds)]
 

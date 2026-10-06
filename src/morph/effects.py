@@ -42,7 +42,7 @@ from .validators import CapabilityValidator
 
 Adapter = Callable[[dict[str, Any]], Any]
 
-CAPABILITY_KEYS = {"description", "requires", "inputs", "outputs", "failures", "idempotency", "retries"}
+CAPABILITY_KEYS = {"description", "requires", "inputs", "outputs", "failures", "idempotency", "retries", "affects"}
 ACTION_KEYS = {"description", "capability", "inputs"}
 
 
@@ -68,7 +68,7 @@ def _typed_fields(raw: Any, label: str, errors: list[str]) -> dict[str, str]:
         return {}
     fields: dict[str, str] = {}
     for name, type_name in raw.items():
-        if type_name not in FIELD_TYPES:
+        if not isinstance(type_name, str) or type_name not in FIELD_TYPES:
             errors.append(f"{label}.{name} has unknown type '{type_name}' (known: {sorted(FIELD_TYPES)})")
         else:
             fields[str(name)] = type_name
@@ -85,6 +85,8 @@ class CapabilitySpec:
     retries: int = 0
     requires: list[str] | None = None
     description: str = ""
+    # Subjects the effect changes in the world. Read by impact analysis, not enforced.
+    affects: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, name: str, data: Any) -> "CapabilitySpec":
@@ -104,6 +106,11 @@ class CapabilitySpec:
         if requires is not None and not isinstance(requires, list):
             errors.append(f"capability '{name}'.requires must be a list of context paths")
             requires = None
+        elif isinstance(requires, list) and not all(isinstance(path, str) and path for path in requires):
+            errors.append(f"capability '{name}'.requires must contain non-empty context paths")
+            requires = []
+        elif isinstance(requires, list):
+            requires = list(dict.fromkeys(requires))
 
         inputs = _typed_fields(data.get("inputs"), f"capability '{name}'.inputs", errors)
         outputs = _typed_fields(data.get("outputs"), f"capability '{name}'.outputs", errors)
@@ -119,13 +126,20 @@ class CapabilitySpec:
             idempotency = []
         else:
             for key in idempotency:
-                if key not in inputs:
+                if not isinstance(key, str) or not key:
+                    errors.append(f"capability '{name}'.idempotency must contain non-empty input names")
+                elif key not in inputs:
                     errors.append(f"capability '{name}'.idempotency names unknown input '{key}'")
 
         retries = data.get("retries", 0)
         if not isinstance(retries, int) or isinstance(retries, bool) or retries < 0:
             errors.append(f"capability '{name}'.retries must be a non-negative integer")
             retries = 0
+
+        affects = data.get("affects") or []
+        if not isinstance(affects, list) or not all(isinstance(item, str) and item for item in affects):
+            errors.append(f"capability '{name}'.affects must be a list of non-empty subjects")
+            affects = []
 
         if errors:
             raise ValueError("; ".join(errors))
@@ -139,6 +153,7 @@ class CapabilitySpec:
             retries=retries,
             requires=list(requires) if requires is not None else None,
             description=str(data.get("description", "")),
+            affects=list(affects),
         )
 
     def grant_definition(self) -> dict[str, Any] | None:
@@ -169,6 +184,8 @@ class CapabilitySpec:
             data["requires"] = list(self.requires)
         if self.description:
             data["description"] = self.description
+        if self.affects:
+            data["affects"] = list(self.affects)
         return data
 
 

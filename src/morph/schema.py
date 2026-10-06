@@ -207,7 +207,7 @@ class Schema:
                     errors.append(f"entity '{name}'.fields must be an object")
                 else:
                     for key, type_name in declared.items():
-                        if type_name not in FIELD_TYPES:
+                        if not isinstance(type_name, str) or type_name not in FIELD_TYPES:
                             errors.append(
                                 f"entity '{name}'.{key} has unknown type '{type_name}' (known: {sorted(FIELD_TYPES)})"
                             )
