@@ -9,6 +9,22 @@ from morph.reasoner import SemanticReasoner
 from morph.schema import Schema
 
 
+# Invariants may read the decision the policies reached, under this reserved root, so they can
+# state rules such as "an on-air destination is only changed with force". Every field is a string;
+# a field the decision does not carry (reason on an allow, policy when nothing matched) reads as "".
+DECISION_ROOT = "decision"
+DECISION_FIELDS = ("status", "action", "policy", "reason")
+
+
+def decision_view(decision: dict[str, Any]) -> dict[str, str]:
+    """The decision as decision invariants see it."""
+    return {name: str(decision.get(name) or "") for name in DECISION_FIELDS}
+
+
+def _reads_decision(paths: Any) -> bool:
+    return any(path == DECISION_ROOT or path.startswith(f"{DECISION_ROOT}.") for path in paths)
+
+
 def _string_list(value: Any) -> list[str]:
     if isinstance(value, str):
         return [value] if value else []
@@ -99,7 +115,14 @@ class MORPHIR:
             except Exception as exc:  # pragma: no cover - compile_when raises ExpressionError
                 errors.append(f"invariant '{name}' has invalid condition: {exc}")
                 continue
-            for issue in schema.validate_paths(predicate.paths):
+            if _reads_decision(predicate.paths):
+                if DECISION_ROOT in schema.entities:
+                    errors.append(f"invariant '{name}' reads '{DECISION_ROOT}', which is reserved for the decision but is also declared as an entity")
+                for path in predicate.paths:
+                    root, *rest = path.split(".")
+                    if root == DECISION_ROOT and (not rest or rest[0] not in DECISION_FIELDS):
+                        errors.append(f"invariant '{name}': '{path}' is not a decision field (known: {list(DECISION_FIELDS)})")
+            for issue in schema.validate_paths(predicate.paths, extra_roots=[DECISION_ROOT]):
                 errors.append(f"invariant '{name}': {issue}")
 
         if errors:
@@ -186,7 +209,8 @@ class MORPHIR:
 
         This is intentionally lightweight: it is a semantic safety probe, not a full model
         checker. It proves whether the current model still satisfies its invariants under a set
-        of representative scenarios.
+        of representative scenarios. An invariant that reads ``decision`` is checked against the
+        decision the policies reached for that scenario.
         """
         from morph.runtime import MORPHRuntime
 
@@ -207,6 +231,7 @@ class MORPHIR:
 
         for index, context in enumerate(scenarios):
             decision = runtime.evaluate(context)
+            observed = {**context, DECISION_ROOT: decision_view(decision)}
             invariant_failures: list[str] = []
             for invariant in self.invariants:
                 if not isinstance(invariant, dict):
@@ -214,7 +239,7 @@ class MORPHIR:
                 name = invariant.get("name", "unknown")
                 try:
                     predicate = compile_when(invariant.get("when"))
-                    if not predicate.evaluate(context):
+                    if not predicate.evaluate(observed if _reads_decision(predicate.paths) else context):
                         invariant_failures.append(name)
                 except Exception:
                     invariant_failures.append(name)
@@ -448,7 +473,10 @@ class MORPHIR:
 
         left_types = field_types(left)
         right_types = field_types(right)
-        return {path: field_type for path, field_type in left_types.items() if right_types.get(path) == field_type}
+        shared = {path: field_type for path, field_type in left_types.items() if right_types.get(path) == field_type}
+        if not any(path.startswith(f"{DECISION_ROOT}.") for path in left_types | right_types):
+            shared.update({f"{DECISION_ROOT}.{name}": "string" for name in DECISION_FIELDS})
+        return shared
 
     @staticmethod
     def _invariant_condition(invariants: list[dict[str, Any]]) -> str:

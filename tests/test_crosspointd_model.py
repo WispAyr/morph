@@ -68,6 +68,38 @@ def test_the_fixture_covers_every_crosspointd_outcome():
     }
 
 
+def _contexts(records):
+    return [
+        {"request": record["request"], "destination": {"id": "dest", **record["destination"]}, "source": {"id": "src", **record["source"]}}
+        for record in records
+    ]
+
+
+def test_every_recorded_scenario_satisfies_the_safety_invariants():
+    _, records = _records()
+    model = MORPHIR.from_dict(load_system_definition(MODEL).to_dict())
+
+    assert len(model.invariants) == 6
+    assert model.simulate(_contexts(records))["failed"] == []
+
+
+@pytest.mark.parametrize("policy, invariant", [
+    ("deny_on_air", "on_air_changed_only_with_force"),
+    ("deny_in_flight", "no_command_while_one_is_in_flight"),
+    ("forward_take", "peer_destinations_are_forwarded"),
+    ("propose_take", "operator_only_gets_proposals"),
+    ("deny_screen_needs_layout", "screens_take_only_layouts"),
+])
+def test_dropping_a_safety_policy_breaks_its_invariant(policy, invariant):
+    _, records = _records()
+    data = load_system_definition(MODEL).to_dict()
+    data["policies"] = [item for item in data["policies"] if item["name"] != policy]
+
+    failed = MORPHIR.from_dict(data).simulate(_contexts(records))["failed"]
+
+    assert failed and any(invariant in item["invariants"] for item in failed)
+
+
 def test_impact_of_the_operator_only_flag_reaches_the_on_air_check_and_proposals():
     impact = MORPHIR.from_dict(load_system_definition(MODEL).to_dict()).impact("destination.operator_only")
 

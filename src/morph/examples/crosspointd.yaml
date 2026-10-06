@@ -71,6 +71,30 @@ actions:
     capability: forward_to_owner
     inputs: {command: '"release"', destination: destination.id, source: '""'}
 
+# The safety rules, stated over the decision the policies reach. morph simulate checks them in
+# every scenario, and morph diff blocks a candidate that rewrites one it cannot prove equivalent.
+invariants:
+  - name: on_air_changed_only_with_force
+    when: >-
+      !(decision.action in ["take", "release", "forced_take", "forced_release"])
+      || !(destination.on_program || destination.program_tally) || request.force
+  - name: force_sent_only_when_on_air
+    when: >-
+      !(decision.action in ["forced_take", "forced_release"])
+      || (request.force && (destination.on_program || destination.program_tally))
+  - name: operator_only_gets_proposals
+    when: >-
+      !destination.operator_only || destination.peer || decision.status == "deny"
+      || decision.action in ["propose_take", "propose_release"]
+  - name: peer_destinations_are_forwarded
+    when: '!destination.peer || decision.action in ["forward_take", "forward_release"]'
+  - name: screens_take_only_layouts
+    when: >-
+      !(decision.action in ["take", "forced_take", "propose_take"])
+      || destination.kind != "screen" || source.kind == "composition"
+  - name: no_command_while_one_is_in_flight
+    when: '!destination.command_in_flight || destination.peer || decision.status == "deny"'
+
 # First match decides, in crosspointd's order. "On air" is crosspointd's lock: the owner
 # reports the destination on programme, or a switcher's tally does.
 policies:

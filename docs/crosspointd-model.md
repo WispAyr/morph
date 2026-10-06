@@ -39,6 +39,17 @@ These differ from the illustrative `crosspoint.yaml`:
 - Proposal resolution: taken, declined, expired, cancelled, superseded, withdrawn.
 - Federation on the owner's side, where a forwarded request is decided.
 
-## A gap in MORPH this exposed
+## Safety invariants
 
-The safety rules here are about decisions, for example "never take an on-air destination without force". MORPH invariants are predicates over the context only, so they cannot state that. The agreement test is what protects these rules today. Invariants that can read the decision would let `morph diff` and the evaluator protect them directly.
+The rules that make manual control safe are about decisions, so the model states them as decision invariants (invariants that read `decision`):
+
+| Invariant | Rule |
+| --- | --- |
+| `on_air_changed_only_with_force` | A take or release on an on-air destination needs force |
+| `force_sent_only_when_on_air` | Force is sent only when it overrides an on-air lock |
+| `operator_only_gets_proposals` | An operator-only destination is never commanded, only proposed to |
+| `peer_destinations_are_forwarded` | A peer's destination is always forwarded to the peer |
+| `screens_take_only_layouts` | A screen is only given a composition |
+| `no_command_while_one_is_in_flight` | No command is sent while one is awaiting an ack |
+
+All 2,560 recorded scenarios satisfy them. They also protect the model without the oracle: removing the policy that enforces any one of them makes `morph simulate` report that invariant as broken, and `morph diff` blocks a candidate that rewrites one in a way it cannot prove equivalent. The evaluator uses both, so an agent's change to this model is checked against these rules directly.
