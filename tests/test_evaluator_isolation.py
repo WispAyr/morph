@@ -11,7 +11,8 @@ import pytest
 ROOT = Path(__file__).parents[1]
 sys.path.insert(0, str(ROOT / "benchmarks"))
 
-from evaluate_candidate import contained_workspace, evaluate_arm  # noqa: E402
+import evaluate_candidate  # noqa: E402
+from evaluate_candidate import contained_workspace, evaluator_task  # noqa: E402
 from finalize_paired_run import finalize_pair  # noqa: E402
 from run_paired_task import _snapshot  # noqa: E402
 from score_agent_runs import score_runs  # noqa: E402
@@ -43,6 +44,37 @@ def reference(tmp_path):
     return path
 
 
+LIVE_ROUTE = {
+    "source": {"id": "cam1", "status": "live", "latency_ms": 40},
+    "destination": {"id": "wall", "status": "ready", "latency_ms": 60, "state": "idle"},
+    "route": {"locked": False},
+    "operator": {"id": "ewan", "capabilities": ["route_control"]},
+}
+
+
+@pytest.fixture
+def manifest(reference):
+    """The private evaluator manifest, beside the reference and outside the repository."""
+    hidden = reference.parent / TASK_ID / "test_loads.py"
+    hidden.parent.mkdir()
+    hidden.write_text(
+        "import os\nfrom pathlib import Path\nfrom morph import load_system_definition\n"
+        "def test_candidate_loads():\n"
+        f"    load_system_definition(Path(os.environ['MORPH_CANDIDATE_WORKSPACE']) / '{DEFINITION}')\n"
+    )
+    path = reference.parent / "manifest.json"
+    path.write_text(json.dumps({"schema_version": 1, "tasks": {TASK_ID: {
+        "tests": [f"{TASK_ID}/test_loads.py"],
+        "simulation_scenarios": [{"context": LIVE_ROUTE, "expected_status": "allow"}],
+    }}}))
+    return path
+
+
+def evaluate_arm(task, pair_dir, arm, run, reference, manifest_path, **options):
+    config = evaluator_task(json.loads(manifest_path.read_text()), task["task_id"])
+    return evaluate_candidate.evaluate_arm(task, pair_dir, arm, run, reference, config, manifest_path.parent, **options)
+
+
 def _arm(pair_dir, arm="morph_mediated", *, edit=None):
     workspace = pair_dir / arm / "source"
     workspace.parent.mkdir(parents=True)
@@ -57,33 +89,35 @@ def _fix_transition(workspace):
     definition.write_text(definition.read_text().replace(BASELINE_TRANSITION, FIXED_TRANSITION))
 
 
-def test_a_correct_in_boundary_change_passes_every_gate(tmp_path, reference):
+def test_a_correct_in_boundary_change_passes_every_gate(tmp_path, reference, manifest):
     pair_dir = tmp_path / "pair"
     run = _arm(pair_dir, edit=_fix_transition)
 
-    result = evaluate_arm(TASK, pair_dir, "morph_mediated", run, reference, allow_development_fixtures=True)
+    result = evaluate_arm(TASK, pair_dir, "morph_mediated", run, reference, manifest, allow_development_fixtures=True)
 
-    assert result["within_boundary"] and result["definition_valid"]
+    assert result["within_boundary"] and result["structural_passed"]
     assert result["changed_files"] == [DEFINITION]
     assert result["tests_passed"] and result["regression_tests_run"] > 100 and not result["regressions"]
     assert result["task_cases_passed"]
-    assert result["invariants_status"] == "not_applicable" and result["simulation_passed"] is None
+    assert result["invariants_status"] == "not_applicable" and result["simulation_passed"] is True
+    # The classifier does not reason about transitions, so it reports the change as unknown, not a guess.
+    assert result["hidden_tests_run"] == 1 and result["semantic_relationship"] == "unknown"
     assert result["implementation_complete"] is True
     assert result["agent_claimed_complete"] is True
 
 
-def test_an_unchanged_workspace_fails_the_task_cases_even_if_the_agent_claims_completion(tmp_path, reference):
+def test_an_unchanged_workspace_fails_the_task_cases_even_if_the_agent_claims_completion(tmp_path, reference, manifest):
     pair_dir = tmp_path / "pair"
     run = _arm(pair_dir)
 
-    result = evaluate_arm(TASK, pair_dir, "morph_mediated", run, reference, allow_development_fixtures=True)
+    result = evaluate_arm(TASK, pair_dir, "morph_mediated", run, reference, manifest, allow_development_fixtures=True)
 
     assert result["agent_claimed_complete"] is True
     assert result["task_cases_passed"] is False
     assert result["implementation_complete"] is False
 
 
-def test_a_recorded_workspace_outside_the_pair_is_rejected(tmp_path, reference):
+def test_a_recorded_workspace_outside_the_pair_is_rejected(tmp_path, reference, manifest):
     pair_dir = tmp_path / "pair"
     _arm(pair_dir, edit=_fix_transition)
     elsewhere = tmp_path / "elsewhere"
@@ -92,7 +126,7 @@ def test_a_recorded_workspace_outside_the_pair_is_rejected(tmp_path, reference):
     _fix_transition(elsewhere / "source")
 
     with pytest.raises(ValueError, match="workspace must be"):
-        evaluate_arm(TASK, pair_dir, "morph_mediated", {"workspace": str(elsewhere / "source")}, reference, allow_development_fixtures=True)
+        evaluate_arm(TASK, pair_dir, "morph_mediated", {"workspace": str(elsewhere / "source")}, reference, manifest, allow_development_fixtures=True)
     with pytest.raises(ValueError, match="workspace must be"):
         contained_workspace(pair_dir, "morph_mediated", str(pair_dir / "direct_source" / "source"))
 
@@ -108,7 +142,7 @@ def test_a_workspace_reached_through_a_symbolic_link_is_rejected(tmp_path):
         contained_workspace(pair_dir, "morph_mediated", str(pair_dir / "morph_mediated" / "source"))
 
 
-def test_a_symbolic_link_inside_the_workspace_is_rejected(tmp_path, reference):
+def test_a_symbolic_link_inside_the_workspace_is_rejected(tmp_path, reference, manifest):
     pair_dir = tmp_path / "pair"
     outside = tmp_path / "outside.yaml"
     outside.write_text("name: elsewhere\n")
@@ -119,10 +153,10 @@ def test_a_symbolic_link_inside_the_workspace_is_rejected(tmp_path, reference):
 
     run = _arm(pair_dir, edit=link_definition)
     with pytest.raises(ValueError, match="symbolic link"):
-        evaluate_arm(TASK, pair_dir, "morph_mediated", run, reference, allow_development_fixtures=True)
+        evaluate_arm(TASK, pair_dir, "morph_mediated", run, reference, manifest, allow_development_fixtures=True)
 
 
-def test_changes_outside_the_boundary_are_reported_and_never_evaluated(tmp_path, reference):
+def test_changes_outside_the_boundary_are_reported_and_never_evaluated(tmp_path, reference, manifest):
     pair_dir = tmp_path / "pair"
 
     def tamper(workspace):
@@ -133,7 +167,7 @@ def test_changes_outside_the_boundary_are_reported_and_never_evaluated(tmp_path,
         (workspace / "tests/test_extra.py").write_text("def test_extra():\n    assert True\n")
 
     run = _arm(pair_dir, edit=tamper)
-    result = evaluate_arm(TASK, pair_dir, "morph_mediated", run, reference, allow_development_fixtures=True)
+    result = evaluate_arm(TASK, pair_dir, "morph_mediated", run, reference, manifest, allow_development_fixtures=True)
 
     assert result["within_boundary"] is False
     assert result["outside_boundary"] == ["src/morph/runtime.py", "tests/test_effects.py", "tests/test_extra.py"]
@@ -144,7 +178,7 @@ def test_changes_outside_the_boundary_are_reported_and_never_evaluated(tmp_path,
     assert result["implementation_complete"] is False
 
 
-def test_a_regression_in_baseline_tests_fails_the_tests_gate(tmp_path, reference):
+def test_a_regression_in_baseline_tests_fails_the_tests_gate(tmp_path, reference, manifest):
     pair_dir = tmp_path / "pair"
 
     def break_routing(workspace):
@@ -153,7 +187,7 @@ def test_a_regression_in_baseline_tests_fails_the_tests_gate(tmp_path, reference
         definition.write_text(definition.read_text().replace("source.latency_ms < 120 && destination.latency_ms < 120", "false"))
 
     run = _arm(pair_dir, edit=break_routing)
-    result = evaluate_arm(TASK, pair_dir, "morph_mediated", run, reference, allow_development_fixtures=True)
+    result = evaluate_arm(TASK, pair_dir, "morph_mediated", run, reference, manifest, allow_development_fixtures=True)
 
     assert result["within_boundary"] and result["task_cases_passed"]
     assert result["tests_passed"] is False
@@ -161,29 +195,61 @@ def test_a_regression_in_baseline_tests_fails_the_tests_gate(tmp_path, reference
     assert result["implementation_complete"] is False
 
 
-def test_evaluator_acceptance_tests_run_against_the_candidate(tmp_path, reference):
-    acceptance = reference.parent / "test_route_scope.py"
-    acceptance.write_text(
-        "from pathlib import Path\n"
-        "from morph import load_system_definition\n"
+def test_hidden_tests_run_against_the_candidate_tree(tmp_path, reference, manifest):
+    hidden = reference.parent / TASK_ID / "test_route_scope.py"
+    hidden.write_text(
+        "import os\nfrom pathlib import Path\nfrom morph import load_system_definition\n"
         "def test_route_success_is_scoped_to_idle():\n"
-        f"    definition = load_system_definition(Path('{DEFINITION}'))\n"
+        f"    definition = load_system_definition(Path(os.environ['MORPH_CANDIDATE_WORKSPACE']) / '{DEFINITION}')\n"
         "    destination = next(e for e in definition.entities if e['name'] == 'destination')\n"
         "    route = next(t for t in destination['transitions'] if t.get('on', t.get(True)) == 'route_source.succeeded')\n"
         "    assert route['from'] == 'idle'\n"
     )
-    data = json.loads(reference.read_text())
-    data["tasks"][TASK_ID]["acceptance_tests"] = ["test_route_scope.py"]
-    reference.write_text(json.dumps(data))
+    data = json.loads(manifest.read_text())
+    data["tasks"][TASK_ID]["tests"].append(f"{TASK_ID}/test_route_scope.py")
+    manifest.write_text(json.dumps(data))
 
-    fixed = evaluate_arm(TASK, tmp_path / "a", "morph_mediated", _arm(tmp_path / "a", edit=_fix_transition), reference, allow_development_fixtures=True)
-    unchanged = evaluate_arm(TASK, tmp_path / "b", "morph_mediated", _arm(tmp_path / "b"), reference, allow_development_fixtures=True)
+    fixed = evaluate_arm(TASK, tmp_path / "a", "morph_mediated", _arm(tmp_path / "a", edit=_fix_transition), reference, manifest, allow_development_fixtures=True)
+    unchanged = evaluate_arm(TASK, tmp_path / "b", "morph_mediated", _arm(tmp_path / "b"), reference, manifest, allow_development_fixtures=True)
 
-    assert fixed["acceptance_tests_run"] == 1 and fixed["tests_passed"] is True
-    assert unchanged["acceptance_failures"] and unchanged["tests_passed"] is False
+    assert fixed["hidden_tests_run"] == 2 and fixed["tests_passed"] is True
+    assert unchanged["hidden_test_failures"] and unchanged["tests_passed"] is False
 
 
-def test_finalized_records_carry_only_evaluator_gates_and_score(tmp_path, reference):
+def test_a_conftest_planted_in_the_workspace_cannot_make_hidden_tests_pass(tmp_path, reference, manifest):
+    hidden = reference.parent / TASK_ID / "test_always_fails.py"
+    hidden.write_text("def test_strict():\n    assert False\n")
+    data = json.loads(manifest.read_text())
+    data["tasks"][TASK_ID]["tests"].append(f"{TASK_ID}/test_always_fails.py")
+    manifest.write_text(json.dumps(data))
+
+    def plant(workspace):
+        _fix_transition(workspace)
+        (workspace / "conftest.py").write_text(
+            "import pytest\n"
+            "@pytest.hookimpl(hookwrapper=True)\n"
+            "def pytest_runtest_makereport(item, call):\n"
+            "    outcome = yield\n"
+            "    outcome.get_result().outcome = 'passed'\n"
+        )
+
+    result = evaluate_arm(TASK, tmp_path / "pair", "morph_mediated", _arm(tmp_path / "pair", edit=plant), reference, manifest, allow_development_fixtures=True)
+
+    assert result["outside_boundary"] == ["conftest.py"]
+    assert result["tests_passed"] is False and result["hidden_test_failures"]
+
+
+def test_a_scenario_reaching_the_wrong_decision_fails_simulation(tmp_path, reference, manifest):
+    data = json.loads(manifest.read_text())
+    data["tasks"][TASK_ID]["simulation_scenarios"][0]["expected_status"] = "deny"
+    manifest.write_text(json.dumps(data))
+
+    result = evaluate_arm(TASK, tmp_path / "pair", "morph_mediated", _arm(tmp_path / "pair", edit=_fix_transition), reference, manifest, allow_development_fixtures=True)
+
+    assert result["simulation_passed"] is False and result["implementation_complete"] is False
+
+
+def test_finalized_records_carry_only_evaluator_gates_and_score(tmp_path, reference, manifest):
     import hashlib
 
     pair_dir = tmp_path / "pair"
@@ -204,7 +270,7 @@ def test_finalized_records_carry_only_evaluator_gates_and_score(tmp_path, refere
     }
     (pair_dir / "pair.json").write_text(json.dumps(pair))
 
-    records, evaluations = finalize_pair(pair_dir / "pair.json", reference, allow_development_fixtures=True)
+    records, evaluations = finalize_pair(pair_dir / "pair.json", manifest, reference, allow_development_fixtures=True)
 
     assert all("judge" not in record and "tests_passed" not in record for record in records)
     by_arm = {evaluation["arm"]: evaluation for evaluation in evaluations}
@@ -214,3 +280,22 @@ def test_finalized_records_carry_only_evaluator_gates_and_score(tmp_path, refere
     scored = score_runs(records, json.loads(reference.read_text()), evaluations)
     assert scored["by_arm"]["morph_mediated"]["task_cases_passed_rate"] == 1.0
     assert scored["by_arm"]["direct_source"]["task_cases_passed_rate"] == 0.0
+
+
+def test_a_planted_sitecustomize_cannot_fake_a_test_pass(tmp_path, reference, manifest):
+    # With the agent's src/ on PYTHONPATH, this file runs at interpreter start and exits 0
+    # before any test, which a gate reading only pytest's exit code would score as a pass.
+    hidden = reference.parent / TASK_ID / "test_always_fails.py"
+    hidden.write_text("def test_strict():\n    assert False\n")
+    data = json.loads(manifest.read_text())
+    data["tasks"][TASK_ID]["tests"].append(f"{TASK_ID}/test_always_fails.py")
+    manifest.write_text(json.dumps(data))
+
+    def plant(workspace):
+        _fix_transition(workspace)
+        (workspace / "src/sitecustomize.py").write_text("import os\nos._exit(0)\n")
+
+    result = evaluate_arm(TASK, tmp_path / "pair", "morph_mediated", _arm(tmp_path / "pair", edit=plant), reference, manifest, allow_development_fixtures=True)
+
+    assert result["outside_boundary"] == ["src/sitecustomize.py"]
+    assert result["tests_passed"] is False and result["hidden_test_failures"]

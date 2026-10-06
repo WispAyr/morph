@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from benchmarks.score_agent_runs import score_runs
+from benchmarks.finalize_paired_run import _simulation_passed, _validate_workspace
 from morph import MORPHIR, MORPHRuntime, MORPHSystem, SemanticReasoner, load_system_definition
 
 
@@ -21,14 +22,15 @@ def _run(arm, *, affected, relationship="broader", tests_passed=True):
     }
 
 
-def _evaluation(arm, *, pair_id="pilot-1", tests_passed=True):
+def _evaluation(arm, *, pair_id="pilot-1", tests_passed=True, semantic_relationship="broader"):
     return {
         "pair_id": pair_id,
         "arm": arm,
         "implementation_complete": True,
         "within_boundary": True,
-        "definition_valid": True,
+        "structural_passed": True,
         "tests_passed": tests_passed,
+        "semantic_relationship": semantic_relationship,
         "simulation_passed": True,
         "task_cases_passed": True,
         "invariants_status": "not_applicable",
@@ -47,6 +49,8 @@ def test_score_runs_compares_a_paired_task_by_arm():
     assert result["by_arm"]["morph_mediated"]["impact_f1_rate"] == 1.0
     assert result["by_arm"]["direct_source"]["impact_recall_rate"] == pytest.approx(2 / 3)
     assert result["by_arm"]["morph_mediated"]["tests_passed_rate"] == 1.0
+    assert result["by_arm"]["morph_mediated"]["structural_passed_rate"] == 1.0
+    assert result["by_arm"]["morph_mediated"]["semantic_relationship_correct_rate"] == 1.0
     assert result["by_arm"]["direct_source"]["tests_passed_rate"] == 0.0
     assert result["mean_paired_deltas_morph_minus_direct"]["tests_passed"] == 1.0
 
@@ -286,9 +290,41 @@ def test_score_runs_rejects_evaluations_without_a_run():
         score_runs(runs, {"tasks": {"pilot": {"affected_subjects": [], "relationship": "broader"}}}, evaluations)
 
 
+def test_finalizer_rejects_workspace_outside_pair_directory(tmp_path):
+    pair = tmp_path / "pair-1" / "pair.json"
+    pair.parent.mkdir(parents=True)
+    external_workspace = tmp_path / "unrelated" / "source"
+    external_workspace.mkdir(parents=True)
+
+    with pytest.raises(ValueError, match="inside this pair"):
+        _validate_workspace(pair, "direct_source", str(external_workspace))
+
+
+def test_finalizer_accepts_only_runner_workspace_for_arm(tmp_path):
+    pair = tmp_path / "pair-1" / "pair.json"
+    pair.parent.mkdir(parents=True)
+    expected = pair.parent / "morph_mediated" / "source"
+    expected.mkdir(parents=True)
+
+    assert _validate_workspace(pair, "morph_mediated", str(expected)) == expected.resolve()
+
+
+def test_evaluator_simulation_checks_expected_decisions_and_invariants():
+    _, candidate = _latency_pilot_models()
+    allowed = _crosspoint_context(100)
+    denied = _crosspoint_context(130)
+    scenarios = [
+        {"context": allowed, "expected_status": "allow"},
+        {"context": denied, "expected_status": "deny"},
+    ]
+
+    assert _simulation_passed(candidate, scenarios) is False
+    scenarios[1]["expected_status"] = "allow"
+    assert _simulation_passed(candidate, scenarios) is True
+
+
 def test_score_runs_rejects_an_evaluation_for_a_different_task():
     runs = [_run("direct_source", affected=[]), _run("morph_mediated", affected=[])]
     evaluations = [_evaluation("direct_source"), {**_evaluation("morph_mediated"), "task_id": "other"}]
     with pytest.raises(ValueError, match="different task"):
         score_runs(runs, {"tasks": {"pilot": {"affected_subjects": [], "relationship": "broader"}}}, evaluations)
-

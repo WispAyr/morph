@@ -1,6 +1,7 @@
 """Independently evaluate one completed arm of a paired run.
 
-The evaluator trusts only the source repository, the corpus, and the private reference.
+The evaluator trusts only the source repository, the corpus, the private reference, and the
+private evaluator manifest (hidden tests, simulation scenarios, approved invariant changes).
 From the agent's workspace it reads the files inside the task's implementation boundary and
 nothing else: every gate runs on a fresh tree exported from the pinned baseline commit with
 those files copied over it. The agent's own Git history, test edits outside the boundary,
@@ -9,13 +10,15 @@ and claims about its work are never inputs to a gate.
 Gates:
 
 - ``within_boundary``: no file outside the implementation boundary differs from the baseline.
-- ``definition_valid``: the candidate MORPH definition loads and validates.
+- ``structural_passed``: the candidate MORPH definition loads, validates, and builds a runtime.
 - ``tests_passed``: every baseline test that passes on the baseline also passes on the
   candidate (test files inside the boundary are excluded, because the agent may change
-  them), and any evaluator acceptance tests listed in the reference pass.
+  them), and every hidden test in the manifest passes.
 - ``task_cases_passed``: the evaluator-only definition cases (``judge_candidate``).
-- ``simulation_passed``: the candidate's invariants hold over the reference scenarios.
+- ``simulation_passed``: every manifest scenario reaches its expected decision and the
+  candidate's invariants hold in it.
 - ``invariants_status``: whether the baseline's invariants are preserved.
+- ``semantic_relationship``: how the candidate relates to the baseline, from the classifier.
 - ``implementation_complete``: every applicable gate above passed.
 
 Running candidate tests executes agent-written code. Run the evaluator inside a container
@@ -41,15 +44,16 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from judge_candidate import _policy_context, judge_candidate  # noqa: E402
-from morph import MORPHIR, load_system_definition  # noqa: E402
+from judge_candidate import judge_candidate  # noqa: E402
+from morph import MORPHIR, MORPHRuntime, load_system_definition  # noqa: E402
 from morph.reasoner import SemanticReasoner  # noqa: E402
 from run_paired_task import EXCLUDED_AGENT_FILES  # noqa: E402
 
 EVALUATOR_VERSION = 1
+RELATIONSHIPS = {"equivalent", "narrower", "broader", "conflicting", "unknown"}
 WORKSPACE_DIRECTORY = "source"
 IGNORED_WORKSPACE_PARTS = {".git", "__pycache__", ".pytest_cache"}
-TEST_TIMEOUT_SECONDS = 600
+DEFAULT_TEST_TIMEOUT_SECONDS = 900
 
 
 def _sha256(data: bytes) -> str:
@@ -70,10 +74,10 @@ def contained_workspace(pair_dir: Path, arm: str, recorded: Any) -> Path:
     for path in (pair_dir / arm, expected):
         if path.is_symlink():
             raise ValueError(f"{arm} workspace path {path} is a symbolic link")
+    if Path(recorded).resolve() != expected.resolve() or expected.resolve() != expected:
+        raise ValueError(f"{arm} workspace must be the runner-created source directory inside this pair ({expected}), not {recorded}")
     if not expected.is_dir():
         raise ValueError(f"{arm} workspace {expected} does not exist")
-    if Path(recorded).resolve() != expected.resolve() or expected.resolve() != expected:
-        raise ValueError(f"{arm} workspace must be {expected}, not {recorded}")
     return expected
 
 
@@ -135,9 +139,11 @@ def _boundary_changes(baseline: dict[str, bytes], workspace: dict[str, Path], bo
 
 
 def _python_environment(tree: Path) -> dict[str, str]:
-    env = {name: os.environ[name] for name in ("PATH", "LANG", "LC_ALL", "TMPDIR", "SYSTEMROOT") if name in os.environ}
+    env = {name: os.environ[name] for name in ("PATH", "LANG", "LC_ALL", "TMP", "TEMP", "TMPDIR", "SYSTEMROOT", "WINDIR") if name in os.environ}
     env["PYTHONPATH"] = os.pathsep.join([str(tree / "src"), str(tree)])
     env["PYTHONDONTWRITEBYTECODE"] = "1"
+    # Hidden tests locate the candidate through this; it is the evaluation tree, never the agent's workspace.
+    env["MORPH_CANDIDATE_WORKSPACE"] = str(tree)
     return env
 
 
@@ -151,7 +157,7 @@ def _confirm_import_root(tree: Path) -> None:
         raise ValueError(f"evaluation tree imports morph from {located}, not from {tree}")
 
 
-def _run_tests(tree: Path, paths: list[str], report: Path) -> dict[str, str]:
+def _run_tests(tree: Path, paths: list[str], report: Path, timeout: int = DEFAULT_TEST_TIMEOUT_SECONDS) -> dict[str, str]:
     """Run pytest on paths inside tree and return each test's outcome by node id."""
     if not paths:
         return {}
@@ -159,7 +165,7 @@ def _run_tests(tree: Path, paths: list[str], report: Path) -> dict[str, str]:
     try:
         subprocess.run(
             [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", f"--junitxml={report}", *paths],
-            cwd=tree, env=_python_environment(tree), check=False, capture_output=True, timeout=TEST_TIMEOUT_SECONDS,
+            cwd=tree, env=_python_environment(tree), check=False, capture_output=True, timeout=timeout,
         )
     except subprocess.TimeoutExpired:
         return {"<timeout>": "failed"}
@@ -216,32 +222,69 @@ def _invariants_status(baseline: MORPHIR, candidate: MORPHIR, allowed: set[str])
     return "pass", detail
 
 
-def _scenarios(reference_task: dict[str, Any]) -> list[dict[str, Any]]:
-    scenarios = reference_task.get("scenarios")
-    if scenarios is not None:
-        if not isinstance(scenarios, list) or not all(isinstance(item, dict) for item in scenarios):
-            raise ValueError("reference scenarios must be a list of context objects")
-        return scenarios
-    return [_policy_context(case) for case in reference_task.get("cases", []) if isinstance(case, dict) and "baseline_status" in case]
+def evaluator_task(manifest: Any, task_id: str) -> dict[str, Any]:
+    """Validate and return one task's entry from the private evaluator manifest."""
+    if not isinstance(manifest, dict) or manifest.get("schema_version") != 1:
+        raise ValueError("evaluator config schema_version must be 1")
+    tasks = manifest.get("tasks")
+    config = tasks.get(task_id) if isinstance(tasks, dict) else None
+    if not isinstance(config, dict):
+        raise ValueError(f"evaluator config has no task '{task_id}'")
+    tests = config.get("tests")
+    if not isinstance(tests, list) or not tests or not all(isinstance(item, str) and item for item in tests):
+        raise ValueError(f"evaluator task '{task_id}' must declare hidden test files")
+    scenarios = config.get("simulation_scenarios")
+    if not isinstance(scenarios, list) or not scenarios or not all(
+        isinstance(item, dict) and isinstance(item.get("context"), dict) and item.get("expected_status") in {"allow", "deny"}
+        for item in scenarios
+    ):
+        raise ValueError(f"evaluator task '{task_id}' scenarios need context objects and expected_status allow/deny")
+    approved = config.get("approved_invariant_changes", [])
+    if not isinstance(approved, list) or not all(isinstance(name, str) for name in approved):
+        raise ValueError(f"evaluator task '{task_id}' approved_invariant_changes must be a list of names")
+    timeout = config.get("test_timeout_seconds", DEFAULT_TEST_TIMEOUT_SECONDS)
+    if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout <= 0:
+        raise ValueError(f"evaluator task '{task_id}' test_timeout_seconds must be a positive integer")
+    return config
 
 
-def _acceptance_tests(reference_path: Path, reference_task: dict[str, Any], tree: Path) -> list[str]:
-    """Copy the reference's evaluator-only acceptance tests into the tree and return their paths."""
-    listed = reference_task.get("acceptance_tests") or []
-    if not isinstance(listed, list) or not all(isinstance(item, str) and item for item in listed):
-        raise ValueError("reference acceptance_tests must be a list of paths")
-    root = reference_path.resolve().parent
-    target_dir = tree / "tests" / "_evaluator_acceptance"
+def simulation_passed(model: MORPHIR, scenarios: list[dict[str, Any]]) -> tuple[bool, list[dict[str, Any]]]:
+    """Every scenario must reach its expected decision with all of the model's invariants holding."""
+    result = model.simulate([scenario["context"] for scenario in scenarios])
+    failures = []
+    for outcome in sorted(result["passed"] + result["failed"], key=lambda item: item["index"]):
+        expected = scenarios[outcome["index"]]["expected_status"]
+        actual = outcome["decision"].get("status")
+        if actual != expected or outcome["invariants"]:
+            failures.append({"index": outcome["index"], "expected_status": expected, "status": actual, "invariants": outcome["invariants"]})
+    complete = len(result["passed"]) + len(result["failed"]) == len(scenarios)
+    return complete and not failures, failures
+
+
+def _hidden_tests(evaluator_root: Path, config: dict[str, Any], tree: Path) -> list[str]:
+    """Copy the manifest's hidden tests into the evaluation tree and return their paths."""
+    root = evaluator_root.resolve()
+    target_dir = tree / "tests" / "_evaluator_hidden"
     copied = []
-    for index, relative in enumerate(listed):
+    for index, relative in enumerate(config["tests"]):
         source = (root / relative).resolve()
         if root not in source.parents or not source.is_file():
-            raise ValueError(f"acceptance test '{relative}' is missing or outside the reference directory")
+            raise ValueError(f"evaluator test path is missing or outside private evaluator storage: {relative}")
         target_dir.mkdir(parents=True, exist_ok=True)
-        target = target_dir / f"test_acceptance_{index}_{source.name.removeprefix('test_')}"
+        target = target_dir / f"test_hidden_{index}_{source.name.removeprefix('test_')}"
         shutil.copyfile(source, target)
         copied.append(target.relative_to(tree).as_posix())
     return copied
+
+
+def _structural_model(path: Path) -> MORPHIR:
+    """Load, validate, and build a runtime for a definition, raising if any step fails."""
+    model = load_system_definition(path).validate()
+    MORPHRuntime(
+        name=model.name, version=model.version, policies=model.policies,
+        capabilities=model.capabilities, entities=model.entities, actions=model.actions,
+    )
+    return model
 
 
 def evaluate_arm(
@@ -250,11 +293,18 @@ def evaluate_arm(
     arm: str,
     run: dict[str, Any],
     reference_path: Path,
+    evaluator_config: dict[str, Any],
+    evaluator_root: Path,
     *,
     allow_development_fixtures: bool = False,
 ) -> dict[str, Any]:
-    """Run every gate for one arm and return its evaluation record."""
+    """Run every gate for one arm and return its evaluation record.
+
+    ``evaluator_config`` is this task's validated manifest entry (see ``evaluator_task``) and
+    ``evaluator_root`` the private directory its hidden test paths are relative to.
+    """
     workspace = contained_workspace(pair_dir, arm, run.get("workspace"))
+    timeout = evaluator_config.get("test_timeout_seconds", DEFAULT_TEST_TIMEOUT_SECONDS)
     reference = json.loads(reference_path.read_text(encoding="utf-8"))
     reference_task = reference.get("tasks", {}).get(task["task_id"]) if isinstance(reference, dict) else None
     if not isinstance(reference_task, dict):
@@ -287,30 +337,30 @@ def evaluate_arm(
 
         candidate_definition = candidate_tree / definition_path
         try:
-            candidate = load_system_definition(candidate_definition)
+            candidate = _structural_model(candidate_definition)
             definition_error = None
         except (OSError, ValueError, TypeError, KeyError) as exc:
             candidate, definition_error = None, str(exc)
-        baseline = load_system_definition(baseline_tree / definition_path)
+        baseline = _structural_model(baseline_tree / definition_path)
 
         regression_files = _regression_test_files(baseline_tree, boundary)
-        baseline_outcomes = _run_tests(baseline_tree, regression_files, scratch_path / "baseline.xml")
-        candidate_outcomes = _run_tests(candidate_tree, regression_files, scratch_path / "candidate.xml")
+        baseline_outcomes = _run_tests(baseline_tree, regression_files, scratch_path / "baseline.xml", timeout)
+        candidate_outcomes = _run_tests(candidate_tree, regression_files, scratch_path / "candidate.xml", timeout)
         regressions = sorted(
             node for node, outcome in baseline_outcomes.items()
             if outcome == "passed" and candidate_outcomes.get(node) != "passed"
         )
-        acceptance_paths = _acceptance_tests(reference_path, reference_task, candidate_tree)
-        acceptance_outcomes = _run_tests(candidate_tree, acceptance_paths, scratch_path / "acceptance.xml")
-        acceptance_failures = sorted(node for node, outcome in acceptance_outcomes.items() if outcome != "passed")
-        if acceptance_paths and not acceptance_outcomes:
-            acceptance_failures = ["<no acceptance tests ran>"]
+        hidden_paths = _hidden_tests(evaluator_root, evaluator_config, candidate_tree)
+        hidden_outcomes = _run_tests(candidate_tree, hidden_paths, scratch_path / "hidden.xml", timeout)
+        hidden_failures = sorted(node for node, outcome in hidden_outcomes.items() if outcome != "passed")
+        if not hidden_outcomes:
+            hidden_failures = ["<no hidden tests ran>"]
         agent_test_files = sorted(path for path in boundary if path.startswith("tests/") and (candidate_tree / path).is_file())
-        agent_outcomes = _run_tests(candidate_tree, agent_test_files, scratch_path / "agent.xml")
+        agent_outcomes = _run_tests(candidate_tree, agent_test_files, scratch_path / "agent.xml", timeout)
 
         if candidate is None:
             task_cases_passed = False
-            simulation_passed: bool | None = False
+            simulated = False
             simulation_failures: list[Any] = ["definition does not load"]
             invariants_status, invariant_detail = "fail", {}
             semantic_relationship = "unknown"
@@ -322,19 +372,15 @@ def evaluate_arm(
             if not judged["baseline_passed"]:
                 raise ValueError(f"{arm} baseline fails the evaluator cases; resolve the evaluation setup before scoring")
             task_cases_passed = judged["task_cases_passed"]
-            scenarios = _scenarios(reference_task)
-            if scenarios and candidate.invariants:
-                simulated = candidate.simulate(scenarios)
-                simulation_failures = [{"index": item["index"], "invariants": item["invariants"]} for item in simulated["failed"]]
-                simulation_passed = not simulation_failures
-            else:
-                simulation_passed, simulation_failures = None, []
-            allowed = set(reference_task.get("allowed_invariant_changes") or [])
+            simulated, simulation_failures = simulation_passed(candidate, evaluator_config["simulation_scenarios"])
+            allowed = set(evaluator_config.get("approved_invariant_changes") or [])
             invariants_status, invariant_detail = _invariants_status(baseline, candidate, allowed)
-            semantic_relationship = baseline.classify_equivalence(candidate).lower()
+            classification = baseline.classify_equivalence(candidate).lower()
+            classification = "equivalent" if classification == "identical" else classification
+            semantic_relationship = classification if classification in RELATIONSHIPS else "unknown"
 
-    tests_passed = not regressions and not acceptance_failures and bool(baseline_outcomes or acceptance_paths)
-    gates = [not outside, candidate is not None, tests_passed, task_cases_passed, simulation_passed is not False, invariants_status != "fail"]
+    tests_passed = not regressions and not hidden_failures and bool(baseline_outcomes)
+    gates = [not outside, candidate is not None, tests_passed, task_cases_passed, simulated, invariants_status != "fail"]
     return {
         "evaluator_version": EVALUATOR_VERSION,
         "task_id": task["task_id"],
@@ -344,16 +390,16 @@ def evaluate_arm(
         "changed_files": changed,
         "outside_boundary": outside,
         "within_boundary": not outside,
-        "definition_valid": candidate is not None,
+        "structural_passed": candidate is not None,
         "definition_error": definition_error,
         "tests_passed": tests_passed,
         "regressions": regressions,
         "regression_tests_run": len(baseline_outcomes),
-        "acceptance_failures": acceptance_failures,
-        "acceptance_tests_run": len(acceptance_outcomes),
+        "hidden_test_failures": hidden_failures,
+        "hidden_tests_run": len(hidden_outcomes),
         "agent_tests_passed": all(outcome == "passed" for outcome in agent_outcomes.values()) if agent_outcomes else None,
         "task_cases_passed": task_cases_passed,
-        "simulation_passed": simulation_passed,
+        "simulation_passed": simulated,
         "simulation_failures": simulation_failures,
         "invariants_status": invariants_status,
         "invariants": invariant_detail,
