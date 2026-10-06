@@ -209,12 +209,15 @@ def test_score_runs_rejects_agent_supplied_judge_fields():
 
 
 def test_classify_equivalence_does_not_call_different_policies_identical_without_invariants():
+    entities = [{"name": "source", "fields": {"status": "string"}}]
     baseline = MORPHIR.from_dict({
         "name": "x",
+        "entities": entities,
         "policies": [{"name": "allow_route", "when": "source.status == 'live'"}],
     })
     candidate = MORPHIR.from_dict({
         "name": "x",
+        "entities": entities,
         "policies": [{"name": "allow_route", "when": "source.status == 'faulted'"}],
     })
     assert baseline.structurally_equal(candidate) is False
@@ -232,4 +235,44 @@ def test_classify_equivalence_distinguishes_structural_and_semantic_equality():
     })
     assert baseline.structurally_equal(candidate) is False
     assert baseline.classify_equivalence(candidate) in {"EQUIVALENT", "UNKNOWN"}
+
+
+def _classification_model(policies, invariants=None):
+    return MORPHIR.from_dict({
+        "name": "x",
+        "entities": [{"name": "source", "fields": {"status": "string", "latency_ms": "int"}}],
+        "invariants": invariants or [],
+        "policies": policies,
+    })
+
+
+def _policy(name, when, action="ok"):
+    return {"name": name, "when": when, "result": {"status": "allow", "action": action}}
+
+
+def test_classify_equivalence_is_unknown_when_a_policy_is_removed():
+    baseline = _classification_model([_policy("a", "source.latency_ms < 120"), _policy("b", "source.status == 'live'")])
+    candidate = _classification_model([_policy("a", "source.latency_ms < 200")])
+    assert baseline.classify_equivalence(candidate) == "UNKNOWN"
+
+
+def test_classify_equivalence_is_unknown_when_policies_are_reordered():
+    first = _policy("a", "source.latency_ms < 120")
+    second = _policy("b", "source.status == 'live'")
+    assert _classification_model([first, second]).classify_equivalence(_classification_model([second, first])) == "UNKNOWN"
+
+
+def test_classify_equivalence_is_unknown_when_a_policy_result_changes():
+    baseline = _classification_model([_policy("a", "source.latency_ms < 120")])
+    candidate = _classification_model([_policy("a", "source.latency_ms <= 119", action="other")])
+    assert baseline.classify_equivalence(candidate) == "UNKNOWN"
+
+
+def test_classify_equivalence_combines_policy_and_invariant_changes():
+    invariant = [{"name": "fast", "when": "source.latency_ms < 120"}]
+    baseline = _classification_model([_policy("a", "source.latency_ms < 120")], invariant)
+    broader_policy = _classification_model([_policy("a", "source.latency_ms < 200")], [{"name": "fast", "when": "source.latency_ms <= 119"}])
+    mixed = _classification_model([_policy("a", "source.latency_ms < 200")], [{"name": "fast", "when": "source.latency_ms < 60"}])
+    assert baseline.classify_equivalence(broader_policy) == "BROADER"
+    assert baseline.classify_equivalence(mixed) == "UNKNOWN"
 

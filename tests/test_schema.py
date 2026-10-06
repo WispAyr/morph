@@ -440,6 +440,7 @@ def test_morph_ir_can_classify_semantic_equivalence_and_emit_a_proposal():
             "version": "0.9.1",
             "entities": [{"name": "source", "fields": {"status": "string", "latency_ms": "int"}}],
             "invariants": [{"name": "live_route", "when": 'source.status == "live" || source.status == "ready"'}],
+            "policies": [{"name": "allow_live", "when": 'source.status == "live" && source.latency_ms < 120', "result": {"status": "allow", "action": "ok"}}],
         }
     )
     conflicting = MORPHIR.from_dict(
@@ -448,6 +449,7 @@ def test_morph_ir_can_classify_semantic_equivalence_and_emit_a_proposal():
             "version": "0.9.2",
             "entities": [{"name": "source", "fields": {"status": "string", "latency_ms": "int"}}],
             "invariants": [{"name": "live_route", "when": 'source.status == "faulted"'}],
+            "policies": [{"name": "allow_live", "when": 'source.status == "live" && source.latency_ms < 120', "result": {"status": "allow", "action": "ok"}}],
         }
     )
 

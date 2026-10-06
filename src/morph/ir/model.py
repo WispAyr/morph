@@ -456,11 +456,14 @@ class MORPHIR:
         return " && ".join(f"({condition})" for condition in conditions) if conditions else "true"
 
     def classify_equivalence(self, candidate: "MORPHIR | dict[str, Any]") -> str:
-        """Return a pragmatic semantic equivalence classification.
+        """Return a conservative semantic classification of a candidate model.
 
-        The classification is intentionally conservative and designed for AI review, not a
-        full theorem prover. It distinguishes identical, equivalent, narrower, broader,
-        conflicting, and unknown cases using explicit invariant conditions.
+        Designed for AI review, not as a full theorem prover. Everything other than policy
+        conditions and invariant conditions must be structurally identical, and policies must
+        keep the same names, order, and results, because evaluation is first-match. The
+        invariant conjunction and each rewritten policy condition are then compared with the
+        reasoner. Unchanged parts do not move the result; any unproven comparison, or changes
+        that pull in different directions, give ``UNKNOWN``.
         """
         if not isinstance(candidate, MORPHIR):
             candidate = MORPHIR.from_dict(candidate)
@@ -472,43 +475,46 @@ class MORPHIR:
         right = candidate._semantic_payload()
         left_policies = left.pop("policies")
         right_policies = right.pop("policies")
+        left_invariants = left.pop("invariants")
+        right_invariants = right.pop("invariants")
         if left != right:
             return "UNKNOWN"
-
-        left_by_name = {item.get("name"): item for item in left_policies if isinstance(item, dict)}
-        right_by_name = {item.get("name"): item for item in right_policies if isinstance(item, dict)}
-        if set(left_by_name) != set(right_by_name):
+        if len(left_policies) != len(right_policies):
             return "UNKNOWN"
 
-        relationships: list[str] = []
-        for name in sorted(left_by_name):
-            before = left_by_name[name]
-            after = right_by_name[name]
+        types = self._shared_semantic_types(self, candidate)
+        comparisons: list[tuple[Any, Any]] = []
+        names: set[Any] = set()
+        for before, after in zip(left_policies, right_policies):
+            if not isinstance(before, dict) or not isinstance(after, dict):
+                if before != after:
+                    return "UNKNOWN"
+                continue
+            if before.get("name") != after.get("name") or before.get("name") in names:
+                return "UNKNOWN"
+            names.add(before.get("name"))
             if before == after:
                 continue
-            before_rest = {k: v for k, v in before.items() if k != "when"}
-            after_rest = {k: v for k, v in after.items() if k != "when"}
+            before_rest = {key: value for key, value in before.items() if key != "when"}
+            after_rest = {key: value for key, value in after.items() if key != "when"}
             if before_rest != after_rest:
                 return "UNKNOWN"
-            analysis = SemanticReasoner().analyze(
-                when_to_cel(before.get("when")),
-                when_to_cel(after.get("when")),
-                types=self._shared_semantic_types(self, candidate),
-            )
+            comparisons.append((before.get("when"), after.get("when")))
+        if left_invariants != right_invariants:
+            comparisons.append((self._invariant_condition(left_invariants), self._invariant_condition(right_invariants)))
+
+        relationships: set[str] = set()
+        for before_when, after_when in comparisons:
+            analysis = SemanticReasoner().analyze(when_to_cel(before_when), when_to_cel(after_when), types=types)
             if analysis["confidence"] != "proven":
                 return "UNKNOWN"
-            relationships.append(analysis["relationship"])
+            relationships.add(analysis["relationship"])
 
-        if not relationships:
-            return "UNKNOWN"
-        if all(item == "equivalent" for item in relationships):
+        changed = relationships - {"equivalent"}
+        if not changed:
             return "EQUIVALENT"
-        if all(item == "broader" for item in relationships):
-            return "BROADER"
-        if all(item == "narrower" for item in relationships):
-            return "NARROWER"
-        if all(item == "conflicting" for item in relationships):
-            return "CONFLICTING"
+        if len(changed) == 1:
+            return changed.pop().upper()
         return "UNKNOWN"
 
     def semantic_equivalence(self, candidate: "MORPHIR | dict[str, Any]") -> bool:
