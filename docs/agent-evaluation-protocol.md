@@ -37,22 +37,28 @@ Every run record holds only what the agent produced and how the run went:
 }
 ```
 
-Gate outcomes belong to the evaluator, not the agent, so they live in a separate evaluation record keyed by `pair_id` and `arm`:
+Gate outcomes belong to the evaluator, not the agent, so they live in a separate evaluation record keyed by `pair_id` and `arm`. `benchmarks/evaluate_candidate.py` produces it; the main fields are:
 
 ```json
 {
   "task_id": "...",
   "pair_id": "...",
   "arm": "direct_source|morph_mediated",
-  "implementation_complete": false,
-  "tests_passed": false,
-  "simulation_passed": false,
-  "task_cases_passed": false,
-  "invariants_status": "not_applicable"
+  "within_boundary": true,
+  "definition_valid": true,
+  "tests_passed": true,
+  "task_cases_passed": true,
+  "simulation_passed": null,
+  "invariants_status": "not_applicable",
+  "semantic_relationship": "narrower",
+  "implementation_complete": true,
+  "agent_claimed_complete": true
 }
 ```
 
-The scorer rejects a run record that carries `judge` or `evaluation` fields, requires exactly one evaluation for every run and no evaluation without a run, and requires one `direct_source` and one `morph_mediated` run per `pair_id`. Score a run file with:
+The record also lists the evaluated files with their hashes, every changed file, files changed outside the boundary, regressions, acceptance-test failures, simulation failures, and per-invariant outcomes, so a reviewer can see why each gate passed or failed.
+
+`simulation_passed` is `null` when the candidate declares no invariants or the reference has no scenarios; the scorer reports its rate over the runs where it applies. The scorer rejects a run record that carries `judge` or `evaluation` fields, requires exactly one evaluation for every run and no evaluation without a run, and requires one `direct_source` and one `morph_mediated` run per `pair_id`. Score a run file with:
 
 ```bash
 python benchmarks/score_agent_runs.py runs.jsonl \
@@ -91,26 +97,34 @@ This judge checks MORPH policy decisions and state transitions. It does not repl
 
 The runner freezes this artifact before sending a `resume` request with the same session token and full source snapshot. The adapter returns an `implementation` object and may include a textual `patch`; the runner also captures the actual workspace diff. Both arms receive snapshots at the corpus-pinned commit with one local baseline commit and no remote history. The MORPH pre-implementation workspace contains only the prompt and definition. The pair order is randomized and recorded.
 
-The implementation response must include a Boolean `implementation_complete`; it may include a non-negative `human_interventions` count. Keep provider/model/version metadata identical across both arms. The runner saves raw phase artifacts and diffs in `pair.json`. After both arms finish, evaluate tests and invariants independently and save gate outcomes in this format:
+The implementation response must include a Boolean `implementation_complete`; it may include a non-negative `human_interventions` count. That claim is recorded as `agent_claimed_complete` and is never a gate. Keep provider/model/version metadata identical across both arms. The runner saves raw phase artifacts and diffs in `pair.json`.
 
-```json
-{
-  "direct_source": {"tests_passed": true, "simulation_passed": true, "invariants_status": "pass"},
-  "morph_mediated": {"tests_passed": true, "simulation_passed": true, "invariants_status": "pass"}
-}
-```
+## Independent Evaluation
 
-Then generate the scorer inputs with the deterministic task-case judge. The finalizer writes the two run records and the two evaluation records to separate files:
+After both arms finish, the finalizer evaluates each arm with `benchmarks/evaluate_candidate.py`. No gate result is supplied from outside: the evaluator computes every gate from trusted inputs.
+
+- **Workspace containment.** An arm's workspace must be exactly `<pair>/<arm>/source`, the path the runner created, and neither it nor its arm directory may be a symbolic link. A workspace recorded anywhere else is rejected, as is any symbolic link or special file inside it.
+- **Trusted evaluation tree.** The evaluator exports the pinned baseline commit from the source repository, without evaluator-only files, into a private temporary directory, and copies over it only the workspace files inside the task's implementation boundary. The agent's Git history, its edits outside the boundary, and its own reports are never inputs to a gate.
+- **`within_boundary`**: no file outside the implementation boundary differs from the baseline. Changed files outside it are listed and make the run incomplete.
+- **`definition_valid`**: the candidate MORPH definition loads and validates.
+- **`tests_passed`**: every baseline test that passes on the baseline also passes on the candidate, and every evaluator acceptance test listed under the reference task's `acceptance_tests` passes. Baseline test files inside the boundary are left out, because the agent may change them; the agent's own tests run separately and are reported as `agent_tests_passed`, which is not a gate.
+- **`task_cases_passed`**: the evaluator-only definition cases.
+- **`simulation_passed`**: the candidate's invariants hold over the reference task's `scenarios`, or over the contexts of its policy cases when it declares none.
+- **`invariants_status`**: `pass` when every baseline invariant is unchanged or proven equivalent, `fail` when one is removed or proven different, `unknown` when a rewrite cannot be proven, and `not_applicable` when the baseline has none. Names listed under the reference task's `allowed_invariant_changes` may change.
+- **`implementation_complete`**: every applicable gate passed.
+
+Generate the scorer inputs with:
 
 ```bash
 python benchmarks/finalize_paired_run.py /private/morph-runs/pair-001/pair.json \
-  --gates /private/morph-evaluator/pair-001/gates.json \
   --reference /secure/evaluator/reference.json \
   --output /private/morph-results/pair-001.runs.jsonl \
   --evaluations-output /private/morph-results/pair-001.evaluations.jsonl
 ```
 
-Append each pair's run and evaluation records to private corpus-wide run and evaluation files before scoring. Keep gate inputs and finalized results outside both the agent workspaces and source checkout. The finalizer enforces that output boundary, runs only after both arms have completed, and verifies frozen prediction hashes, prompt hash, task status, and pinned baseline before reading the evaluator reference. Its definition-case judge replays the pinned baseline as a sanity check. A failed baseline sanity check is an evaluation setup failure and must be resolved before interpreting candidate results.
+The evaluator runs agent-written code when it runs the candidate's tests. Run it inside a container or VM that can reach only the pair directory, the source repository, and the evaluator's reference.
+
+Append each pair's run and evaluation records to private corpus-wide run and evaluation files before scoring. Keep finalized results outside both the agent workspaces and source checkout. The finalizer enforces that output boundary, runs only after both arms have completed, and verifies frozen prediction hashes, prompt hash, task status, and pinned baseline before reading the evaluator reference. Its definition-case judge replays the pinned baseline as a sanity check. A failed baseline sanity check is an evaluation setup failure and must be resolved before interpreting candidate results.
 
 Example invocation:
 
@@ -120,7 +134,7 @@ python benchmarks/run_paired_task.py TASK_ID pair-001 \
   --output-dir /private/morph-runs
 ```
 
-Development fixtures require `--allow-development-fixtures` for both runner and finalizer and are never benchmark evidence. The runner prepares separate workspaces and omits known evaluator files, but it does not provide an operating-system sandbox. Run adapters inside a container or remote environment that can access only the supplied workspace; otherwise the adapter may still read other host files. The pair output is raw agent evidence until finalized with independent gate results.
+Development fixtures require `--allow-development-fixtures` for both runner and finalizer and are never benchmark evidence. The runner prepares separate workspaces and omits known evaluator files, but it does not provide an operating-system sandbox. Run adapters inside a container or remote environment that can access only the supplied workspace; otherwise the adapter may still read other host files. The pair output is raw agent evidence until the finalizer has evaluated it.
 
 Keep the evaluator reference and hidden acceptance tests outside the agent-visible mount until both arms for a task are complete. The repository's two current tasks are marked `development_fixture`: their expected cases were pushed in Git history, so they are compromised and must not count as blind benchmark tasks. A private copy of those labels is kept in evaluator storage outside the repository for local judge development only. Set `MORPH_EVALUATOR_REFERENCE` to its path to have `pytest` also check the latency pilot against those labels; without it, that test is skipped and a self-contained Crosspoint test still covers the pilot's semantics. New frozen task labels must be authored directly in private evaluator storage and must never be added to this repository or its agent-visible worktrees.
 

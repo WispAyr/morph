@@ -26,6 +26,8 @@ def _evaluation(arm, *, pair_id="pilot-1", tests_passed=True):
         "pair_id": pair_id,
         "arm": arm,
         "implementation_complete": True,
+        "within_boundary": True,
+        "definition_valid": True,
         "tests_passed": tests_passed,
         "simulation_passed": True,
         "task_cases_passed": True,

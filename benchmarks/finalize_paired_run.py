@@ -1,4 +1,4 @@
-"""Finalize one completed paired run with evaluator-produced gate outcomes."""
+"""Finalize one completed paired run: verify its artifacts and evaluate both arms independently."""
 
 from __future__ import annotations
 
@@ -14,10 +14,9 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from judge_candidate import judge_candidate  # noqa: E402
+from evaluate_candidate import evaluate_arm  # noqa: E402
 
 ARMS = ("direct_source", "morph_mediated")
-INVARIANT_STATUSES = {"pass", "fail", "unknown", "not_applicable"}
 
 
 def _read_json(path: Path) -> Any:
@@ -26,7 +25,6 @@ def _read_json(path: Path) -> Any:
 
 def finalize_pair(
     pair_path: Path,
-    gates_path: Path,
     reference_path: Path,
     *,
     allow_development_fixtures: bool = False,
@@ -34,16 +32,15 @@ def finalize_pair(
     """Return the agent run records and the independent evaluation records for one pair.
 
     The scorer rejects run records that carry evaluator-owned fields, so gate outcomes are
-    kept in their own records keyed by pair and arm.
+    kept in their own records keyed by pair and arm. Every gate is computed here by the
+    evaluator; nothing the agent or adapter reports is taken as a gate result.
     """
     pair = _read_json(pair_path)
-    gates = _read_json(gates_path)
     if not isinstance(pair, dict) or not isinstance(pair.get("runs"), dict):
         raise ValueError("pair artifact must contain a runs object")
-    if not isinstance(gates, dict):
-        raise ValueError("gate results must be an object keyed by arm")
-    if set(pair["runs"]) != set(ARMS) or set(gates) != set(ARMS):
-        raise ValueError("pair artifact and gate results must each contain both paired arms")
+    if set(pair["runs"]) != set(ARMS):
+        raise ValueError("pair artifact must contain both paired arms")
+    pair_dir = pair_path.resolve().parent
     task_id = pair.get("task_id")
     pair_id = pair.get("pair_id")
     if not isinstance(task_id, str) or not isinstance(pair_id, str):
@@ -65,15 +62,8 @@ def finalize_pair(
     evaluations = []
     for arm in ARMS:
         run = pair["runs"][arm]
-        gate = gates[arm]
-        if not isinstance(run, dict) or not isinstance(gate, dict):
-            raise ValueError(f"{arm} run and gate result must be objects")
-        for key in ("tests_passed", "simulation_passed"):
-            if not isinstance(gate.get(key), bool):
-                raise ValueError(f"{arm}.{key} must be a Boolean independently measured outcome")
-        invariants = gate.get("invariants_status")
-        if invariants not in INVARIANT_STATUSES:
-            raise ValueError(f"{arm}.invariants_status must be one of {sorted(INVARIANT_STATUSES)}")
+        if not isinstance(run, dict):
+            raise ValueError(f"{arm} run must be an object")
 
         frozen = run.get("pre_implementation")
         analysis = frozen.get("analysis") if isinstance(frozen, dict) else None
@@ -87,18 +77,10 @@ def finalize_pair(
             raise ValueError(f"{arm} baseline commit does not match the corpus")
         if task_entry.get("evaluation_status") != "frozen" and not allow_development_fixtures:
             raise ValueError(f"task '{task_id}' is a development fixture")
-        workspace = Path(run["workspace"]).resolve()
-        candidate = (workspace / task_entry["baseline_definition"]).resolve()
-        if workspace not in candidate.parents or not candidate.is_file():
-            raise ValueError(f"{arm} candidate definition is missing or outside its workspace")
-        judged = judge_candidate(
-            task_id, candidate, reference_path,
-            allow_development_fixture=allow_development_fixtures,
+        evaluation = evaluate_arm(
+            task_entry, pair_dir, arm, run, reference_path,
+            allow_development_fixtures=allow_development_fixtures,
         )
-        if not judged["baseline_passed"]:
-            raise ValueError(f"{arm} baseline fails the evaluator cases; resolve the evaluation setup before scoring")
-        if not isinstance(run.get("implementation_complete"), bool):
-            raise ValueError(f"{arm}.implementation_complete must be a Boolean")
         agent = run.get("agent")
         if not isinstance(agent, dict) or any(not isinstance(agent.get(key), str) or not agent[key] for key in ("provider", "model", "version")):
             raise ValueError(f"{arm}.agent must declare provider, model, and version")
@@ -121,16 +103,7 @@ def finalize_pair(
             "human_interventions": interventions,
             "elapsed_seconds": elapsed,
         })
-        evaluations.append({
-            "task_id": task_id,
-            "pair_id": pair_id,
-            "arm": arm,
-            "implementation_complete": run.get("implementation_complete"),
-            "tests_passed": gate["tests_passed"],
-            "simulation_passed": gate["simulation_passed"],
-            "task_cases_passed": judged["task_cases_passed"],
-            "invariants_status": invariants,
-        })
+        evaluations.append({"pair_id": pair_id, **evaluation})
     return records, evaluations
 
 
@@ -149,7 +122,6 @@ def _write_jsonl(path: Path, records: list[dict[str, Any]]) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("pair", type=Path, help="Completed pair.json from run_paired_task.py")
-    parser.add_argument("--gates", type=Path, required=True, help="Evaluator JSON with test, simulation, and invariant outcomes")
     parser.add_argument("--reference", type=Path, required=True, help="Private evaluator reference JSON")
     parser.add_argument("--output", type=Path, required=True, help="Run records JSONL path outside agent-visible workspaces")
     parser.add_argument("--evaluations-output", type=Path, required=True, help="Independent evaluation JSONL path outside agent-visible workspaces")
@@ -157,7 +129,7 @@ def main() -> int:
     args = parser.parse_args()
     try:
         records, evaluations = finalize_pair(
-            args.pair, args.gates, args.reference,
+            args.pair, args.reference,
             allow_development_fixtures=args.allow_development_fixtures,
         )
         output_path = args.output.resolve()
@@ -172,6 +144,7 @@ def main() -> int:
                 raise ValueError("scorer output must be outside the source repository")
         _write_jsonl(output_path, records)
         _write_jsonl(evaluations_path, evaluations)
+        evaluations_path.chmod(0o400)
     except (OSError, ValueError, TypeError, KeyError) as exc:
         parser.error(str(exc))
     print(json.dumps({
