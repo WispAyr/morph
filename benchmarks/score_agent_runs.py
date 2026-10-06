@@ -180,6 +180,8 @@ def _validate_corpus(corpus: Any, reference: dict[str, Any]) -> dict[str, dict[s
         for key in ("category", "difficulty", "prompt", "baseline_definition"):
             if not isinstance(task.get(key), str) or not task[key]:
                 raise ValueError(f"{label}.{key} must be a non-empty string")
+        if task.get("evaluation_status") not in {"development_fixture", "frozen"}:
+            raise ValueError(f"{label}.evaluation_status must be 'development_fixture' or 'frozen'")
         commit = task.get("baseline_commit")
         if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
             raise ValueError(f"{label}.baseline_commit must be a full lowercase Git commit SHA")
@@ -237,28 +239,34 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("runs", type=Path, help="JSON Lines file containing paired agent run records")
     parser.add_argument("--reference", type=Path, required=True, help="JSON reference labels keyed by task_id")
-    parser.add_argument("--corpus", type=Path, help="Optional versioned task corpus index to validate against")
+    parser.add_argument("--corpus", type=Path, required=True, help="Versioned task corpus index to validate against")
+    parser.add_argument("--allow-development-fixtures", action="store_true", help="Allow explicitly marked fixtures; results are not benchmark evidence")
     parser.add_argument("--pretty", action="store_true")
     args = parser.parse_args()
 
     try:
         reference = json.loads(args.reference.read_text(encoding="utf-8"))
-        corpus_tasks = None
-        if args.corpus:
-            corpus_tasks = _read_corpus(args.corpus, reference)
+        corpus_tasks = _read_corpus(args.corpus, reference)
+        fixture_tasks = sorted(
+            task_id for task_id, task in corpus_tasks.items()
+            if task["evaluation_status"] == "development_fixture"
+        )
+        if fixture_tasks and not args.allow_development_fixtures:
+            raise ValueError(
+                f"corpus contains development fixtures {fixture_tasks}; pass --allow-development-fixtures for local validation only"
+            )
         runs = _read_jsonl(args.runs)
         result = score_runs(runs, reference)
-        if corpus_tasks is not None:
-            covered = {run.get("task_id") for run in runs if isinstance(run, dict)}
-            if covered != set(corpus_tasks):
-                missing = sorted(set(corpus_tasks) - covered)
-                extra = sorted(covered - set(corpus_tasks))
-                raise ValueError(f"run task coverage does not match corpus (missing: {missing}; extra: {extra})")
-        if corpus_tasks is not None:
-            result["corpus"] = {
-                "tasks": len(corpus_tasks),
-                "task_ids": sorted(corpus_tasks),
-            }
+        covered = {run.get("task_id") for run in runs if isinstance(run, dict)}
+        if covered != set(corpus_tasks):
+            missing = sorted(set(corpus_tasks) - covered)
+            extra = sorted(covered - set(corpus_tasks))
+            raise ValueError(f"run task coverage does not match corpus (missing: {missing}; extra: {extra})")
+        result["corpus"] = {
+            "tasks": len(corpus_tasks),
+            "task_ids": sorted(corpus_tasks),
+            "development_fixtures": fixture_tasks,
+        }
     except (OSError, ValueError, TypeError) as exc:
         parser.error(str(exc))
     print(json.dumps(result, indent=2 if args.pretty else None))

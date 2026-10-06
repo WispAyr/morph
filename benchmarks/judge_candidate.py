@@ -98,7 +98,13 @@ def _case_result(definition: Any, case: dict[str, Any]) -> str:
     raise ValueError(f"unsupported reference case: {case}")
 
 
-def judge_candidate(task_id: str, candidate_path: Path, reference_path: Path) -> dict[str, Any]:
+def judge_candidate(
+    task_id: str,
+    candidate_path: Path,
+    reference_path: Path,
+    *,
+    allow_development_fixture: bool = False,
+) -> dict[str, Any]:
     corpus = _load_json(REPO_ROOT / "benchmarks/agent-study/corpus.json")
     reference = _load_json(reference_path)
     if not isinstance(corpus, dict) or not isinstance(corpus.get("tasks"), list):
@@ -109,6 +115,8 @@ def judge_candidate(task_id: str, candidate_path: Path, reference_path: Path) ->
     if task_id not in tasks:
         raise ValueError(f"unknown task '{task_id}'")
     task = tasks[task_id]
+    if task.get("evaluation_status") != "frozen" and not allow_development_fixture:
+        raise ValueError(f"task '{task_id}' is a development fixture; it cannot count as benchmark evidence")
     reference_task = reference.get("tasks", {}).get(task_id)
     if not isinstance(reference_task, dict):
         raise ValueError(f"reference has no task '{task_id}'")
@@ -152,9 +160,13 @@ def main() -> int:
     parser.add_argument("task_id", help="Task identifier from the evaluator corpus")
     parser.add_argument("candidate", type=Path, help="Candidate MORPH YAML definition")
     parser.add_argument("--reference", type=Path, required=True, help="Evaluator-only reference JSON")
+    parser.add_argument("--allow-development-fixture", action="store_true", help="Permit a known leaked fixture for local validation only")
     args = parser.parse_args()
     try:
-        result = judge_candidate(args.task_id, args.candidate, args.reference)
+        result = judge_candidate(
+            args.task_id, args.candidate, args.reference,
+            allow_development_fixture=args.allow_development_fixture,
+        )
     except (OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError) as exc:
         parser.error(str(exc))
     print(json.dumps(result, indent=2))

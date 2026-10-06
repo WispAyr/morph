@@ -47,20 +47,72 @@ Every run records:
 The scorer requires one `direct_source` and one `morph_mediated` record per `pair_id`. Score a run file with:
 
 ```bash
-python benchmarks/score_agent_runs.py runs.jsonl --reference benchmarks/agent-study/reference.json --pretty
+python benchmarks/score_agent_runs.py runs.jsonl \
+  --reference /secure/evaluator/reference.json \
+  --corpus benchmarks/agent-study/corpus.json --pretty
 ```
 
-When scoring against the checked-in task index, also pass `--corpus benchmarks/agent-study/corpus.json`. The index pins each task to a baseline commit, prompt, definition, and expected implementation boundary. The scorer checks that the index and evaluator reference agree and that the run file covers every indexed task.
+The corpus index is required. It pins each task to a baseline commit, prompt, definition, and expected implementation boundary. The scorer checks that the index and evaluator reference agree and that the run file covers every indexed task. Development fixtures require `--allow-development-fixtures` and their results are not benchmark evidence.
 
 The deterministic definition-case judge is `benchmarks/judge_candidate.py`. The evaluator runs it against each candidate definition and records its `task_cases_passed` result in the run artifact. It replays the pinned baseline first as a reference sanity check. For example:
 
 ```bash
-python benchmarks/judge_candidate.py crosspoint-route-success-from-idle candidate.yaml --reference /private/evaluator/reference.json
+python benchmarks/judge_candidate.py crosspoint-route-success-from-idle candidate.yaml \
+  --reference /secure/evaluator/reference.json --allow-development-fixture
 ```
 
 This judge checks MORPH policy decisions and state transitions. It does not replace hidden implementation tests or establish implementation equivalence.
 
-The runner must keep `reference.json` and hidden acceptance tests outside the agent-visible mount until both arms for a task are complete. Files in `benchmarks/agent-study/` that contain evaluator labels are evaluator-only; do not mount them into agent workspaces. The checked-in references are for local judge validation, not agent input.
+## Paired Runner
+
+`benchmarks/run_paired_task.py` coordinates a pair through a provider adapter. The adapter is an executable that reads one JSON request from stdin and writes one JSON response to stdout. A `start` request includes the arm, phase, task prompt, workspace path, and whether source is available. It returns:
+
+```json
+{
+  "agent": {"provider": "...", "model": "...", "version": "..."},
+  "session_token": "opaque-provider-session-id",
+  "pre_implementation": {
+    "understanding": {},
+    "semantic_proposal": {},
+    "morph_analysis": {},
+    "analysis": {"affected_subjects": [], "relationship": "unknown"}
+  }
+}
+```
+
+The runner freezes this artifact before sending a `resume` request with the same session token and full source snapshot. The adapter returns an `implementation` object and may include a textual `patch`; the runner also captures the actual workspace diff. Both arms receive snapshots at the corpus-pinned commit with one local baseline commit and no remote history. The MORPH pre-implementation workspace contains only the prompt and definition. The pair order is randomized and recorded.
+
+The implementation response must include a Boolean `implementation_complete`; it may include a non-negative `human_interventions` count. Keep provider/model/version metadata identical across both arms. The runner saves raw phase artifacts and diffs in `pair.json`. After both arms finish, evaluate tests and invariants independently and save gate outcomes in this format:
+
+```json
+{
+  "direct_source": {"tests_passed": true, "simulation_passed": true, "invariants_status": "pass"},
+  "morph_mediated": {"tests_passed": true, "simulation_passed": true, "invariants_status": "pass"}
+}
+```
+
+Then generate the two scorer records with the deterministic task-case judge:
+
+```bash
+python benchmarks/finalize_paired_run.py /private/morph-runs/pair-001/pair.json \
+  --gates /private/morph-runs/pair-001/gates.json \
+  --reference /secure/evaluator/reference.json \
+  --output /private/morph-runs/pair-001/runs.jsonl
+```
+
+Append each pair's JSONL records to the corpus-wide run file before scoring. The finalizer must be run only after both arms have completed; its definition-case judge reads the evaluator reference. A failed baseline sanity check is an evaluation setup failure and must be resolved before interpreting candidate results.
+
+Example invocation:
+
+```bash
+python benchmarks/run_paired_task.py TASK_ID pair-001 \
+  --adapter python --adapter-arg /path/to/provider_adapter.py \
+  --output-dir /private/morph-runs
+```
+
+Development fixtures require `--allow-development-fixtures` for both runner and finalizer and are never benchmark evidence. The runner prepares separate workspaces and omits known evaluator files, but it does not provide an operating-system sandbox. Run adapters inside a container or remote environment that can access only the supplied workspace; otherwise the adapter may still read other host files. The pair output is raw agent evidence until finalized with independent gate results.
+
+Keep the evaluator reference and hidden acceptance tests outside the agent-visible mount until both arms for a task are complete. The repository's two current tasks are marked `development_fixture`: their expected cases were pushed in Git history, so they are compromised and must not count as blind benchmark tasks. A private copy of those labels is stored at `/Users/ewanrichardson/Library/Application Support/MORPH/evaluator/reference.json` for local judge development only. New frozen task labels must be authored directly in private evaluator storage and must never be added to this repository or its agent-visible worktrees.
 
 Before source access in the MORPH-mediated arm, the agent records affected entities, policies, capabilities, state transitions, invariants, expected behavior, simulation scenarios, assumptions, and unresolved questions. Every invariant claim includes MORPH evidence or is marked UNKNOWN. Preserve this artifact so the later implementation cannot rewrite the agent's initial impact estimate.
 
@@ -110,6 +162,6 @@ Freeze twenty genuine change requests before the first run. Each task needs a ba
 
 Use the remaining four tasks for compound changes spanning multiple categories. Do not invent post-hoc tasks to favor either arm.
 
-The repository contains the latency pilot and a second state-transition task in a versioned corpus index. Provider runner integrations and the remaining eighteen frozen tasks are still prerequisites for executing and making claims from this experiment; the protocol and task index are not results.
+The repository contains a latency pilot and a second state-transition task in a versioned corpus index; both are development fixtures, not hidden evaluation data. Provider runner integrations and a fresh frozen twenty-task corpus are still prerequisites for executing and making claims from this experiment; the protocol and task index are not results.
 
-The task index is in [benchmarks/agent-study/corpus.json](../benchmarks/agent-study/corpus.json). The pilot and state-transition prompts are in [benchmarks/agent-study/pilot-crosspoint-latency.md](../benchmarks/agent-study/pilot-crosspoint-latency.md) and [benchmarks/agent-study/task-crosspoint-transition-scope.md](../benchmarks/agent-study/task-crosspoint-transition-scope.md); evaluator-only reference cases are in [benchmarks/agent-study/reference.json](../benchmarks/agent-study/reference.json). Eighteen more tasks are needed before the planned study.
+The task index is in [benchmarks/agent-study/corpus.json](../benchmarks/agent-study/corpus.json). The pilot and state-transition prompts are in [benchmarks/agent-study/pilot-crosspoint-latency.md](../benchmarks/agent-study/pilot-crosspoint-latency.md) and [benchmarks/agent-study/task-crosspoint-transition-scope.md](../benchmarks/agent-study/task-crosspoint-transition-scope.md). Their evaluator reference is intentionally external to the repository; these two tasks remain local development fixtures.
