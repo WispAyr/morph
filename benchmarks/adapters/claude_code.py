@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import uuid
@@ -36,6 +37,8 @@ from typing import Any
 
 PROVIDER = "anthropic"
 RELATIONSHIPS = ["equivalent", "narrower", "broader", "conflicting", "unknown"]
+# Subjects use the same kind:name vocabulary as the evaluator's labels, so impact scores measure understanding, not naming.
+SUBJECT_PATTERN = r"^(policy|invariant|action|capability|entity|field|transition):[A-Za-z0-9_.\-]+$"
 
 ANALYSIS_SCHEMA = {
     "type": "object",
@@ -59,8 +62,13 @@ ANALYSIS_SCHEMA = {
             "properties": {
                 "affected_subjects": {
                     "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Every part of the definition whose meaning or effect changes, as kind:name, for example policy:deny_on_air, invariant:on_air_changed_only_with_force, action:take, capability:route_command, field:destination.accepts.",
+                    "items": {"type": "string", "pattern": SUBJECT_PATTERN},
+                    "description": (
+                        "Every existing part of the definition whose meaning or effect changes, as kind:name using the "
+                        "definition's own names exactly: policy:<name>, invariant:<name>, action:<name>, "
+                        "capability:<name>, entity:<name>, field:<entity>.<field>, or transition:<entity>.<event>. "
+                        "Name a new field the task introduces as field:<entity>.<field>. Do not list parts you would add."
+                    ),
                 },
                 "relationship": {
                     "enum": RELATIONSHIPS,
@@ -130,10 +138,15 @@ def _analysis_prompt(request: dict[str, Any]) -> str:
 
 def _implementation_prompt(request: dict[str, Any]) -> str:
     morph = " You may also run the morph CLI." if request["arm"] == "morph_mediated" else ""
+    boundary = request.get("implementation_boundary") or []
+    allowed = (
+        " Change only these files, relative to the source tree; a change to any other file, including a new one, "
+        "fails the task: " + ", ".join(f"`{path}`" for path in boundary) + "." if boundary else ""
+    )
     return (
         "Your prediction is now frozen. Implement the task.\n\n"
         f"The source tree is at {request['workspace']}. Make all changes there, using absolute paths, and run "
-        f"the tests from that directory (`cd {request['workspace']} && python -m pytest -q`).{morph} "
+        f"the tests from that directory (`cd {request['workspace']} && python -m pytest -q`).{allowed}{morph} "
         "Do not commit. When you are done, answer with the structured result: whether the implementation is "
         "complete with its tests passing, and a short summary.\n\n"
         f"--- Task ---\n{request['prompt']}"
@@ -207,6 +220,9 @@ def start(request: dict[str, Any], *, claude: str, model: str) -> dict[str, Any]
     analysis = answer.get("analysis")
     if not isinstance(analysis, dict) or analysis.get("relationship") not in RELATIONSHIPS:
         raise ValueError("claude's analysis is missing a valid relationship")
+    malformed = [s for s in analysis.get("affected_subjects") or [] if not isinstance(s, str) or not re.match(SUBJECT_PATTERN, s)]
+    if malformed:
+        raise ValueError(f"affected subjects must be kind:name: {malformed[:5]}")
     return {
         "agent": {"provider": PROVIDER, "model": model, "version": _version(claude)},
         # Claude Code finds a session by the directory it started in, so the token carries both.

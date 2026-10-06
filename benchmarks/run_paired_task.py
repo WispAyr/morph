@@ -63,6 +63,8 @@ def _snapshot(commit: str, destination: Path) -> str:
     _run_git(["add", "-A"], cwd=destination)
     _run_git([
         "-c", "user.name=MORPH Evaluation", "-c", "user.email=morph-eval@localhost",
+        # A throwaway local snapshot: never signed, so a user's signing setup cannot break or slow a run.
+        "-c", "commit.gpgsign=false",
         "commit", "--quiet", "-m", "Pinned baseline snapshot",
     ], cwd=destination)
     revision = subprocess.run(
@@ -248,6 +250,8 @@ def run_pair(
             "workspace": str(workspace),
             "source_access": True,
             "baseline_definition": task["baseline_definition"],
+            # The files the task may change. The evaluator fails any change outside them, so the agent is told.
+            "implementation_boundary": task["implementation_boundary"],
             "pre_implementation": pre_implementation,
             "pre_implementation_sha256": analysis_hash,
         }
