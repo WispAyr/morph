@@ -41,6 +41,66 @@
         "tests/fixtures/crosspointd_manual_decisions.jsonl.gz",
         "docs/crosspointd-model.md"
       ]
+    },
+    {
+      "task_id": "crosspointd-rules-release-retry-immediately",
+      "category": "behaviour_broadening",
+      "evaluation_status": "frozen",
+      "difficulty": "easy",
+      "baseline_commit": "6f1e4205a0d83d4fb2e304ad5138ee2be27ae25d",
+      "prompt": "benchmarks/agent-study/task-crosspointd-rules-release-retry.md",
+      "baseline_definition": "src/morph/examples/crosspointd_rules.yaml",
+      "implementation_boundary": [
+        "src/morph/examples/crosspointd_rules.yaml",
+        "tests/test_crosspointd_rules_model.py",
+        "tests/fixtures/crosspointd_rule_decisions.jsonl.gz",
+        "docs/crosspointd-model.md"
+      ]
+    },
+    {
+      "task_id": "crosspointd-peer-force-refused",
+      "category": "behaviour_narrowing",
+      "evaluation_status": "frozen",
+      "difficulty": "medium",
+      "baseline_commit": "6f1e4205a0d83d4fb2e304ad5138ee2be27ae25d",
+      "prompt": "benchmarks/agent-study/task-crosspointd-peer-force.md",
+      "baseline_definition": "src/morph/examples/crosspointd.yaml",
+      "implementation_boundary": [
+        "src/morph/examples/crosspointd.yaml",
+        "tests/test_crosspointd_model.py",
+        "tests/fixtures/crosspointd_manual_decisions.jsonl.gz",
+        "docs/crosspointd-model.md"
+      ]
+    },
+    {
+      "task_id": "crosspointd-rules-release-hold-time",
+      "category": "schema_extension",
+      "evaluation_status": "frozen",
+      "difficulty": "hard",
+      "baseline_commit": "6f1e4205a0d83d4fb2e304ad5138ee2be27ae25d",
+      "prompt": "benchmarks/agent-study/task-crosspointd-rules-hold-time.md",
+      "baseline_definition": "src/morph/examples/crosspointd_rules.yaml",
+      "implementation_boundary": [
+        "src/morph/examples/crosspointd_rules.yaml",
+        "tests/test_crosspointd_rules_model.py",
+        "tests/fixtures/crosspointd_rule_decisions.jsonl.gz",
+        "docs/crosspointd-model.md"
+      ]
+    },
+    {
+      "task_id": "crosspointd-operator-only-release-needs-force",
+      "category": "safety_exception",
+      "evaluation_status": "frozen",
+      "difficulty": "hard",
+      "baseline_commit": "6f1e4205a0d83d4fb2e304ad5138ee2be27ae25d",
+      "prompt": "benchmarks/agent-study/task-crosspointd-operator-only-release.md",
+      "baseline_definition": "src/morph/examples/crosspointd.yaml",
+      "implementation_boundary": [
+        "src/morph/examples/crosspointd.yaml",
+        "tests/test_crosspointd_model.py",
+        "tests/fixtures/crosspointd_manual_decisions.jsonl.gz",
+        "docs/crosspointd-model.md"
+      ]
     }
   ]
 }
