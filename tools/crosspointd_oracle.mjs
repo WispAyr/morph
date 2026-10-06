@@ -1,6 +1,6 @@
 // Record what crosspointd actually decides for manual take / release requests.
 //
-// Usage: node tools/crosspointd_oracle.mjs /path/to/crosspoint | gzip -n -9 > tests/fixtures/crosspointd_manual_decisions.jsonl.gz
+// Usage: node tools/crosspointd_oracle.mjs /path/to/crosspoint [--shadow LOG] | gzip -n -9 > tests/fixtures/crosspointd_manual_decisions.jsonl.gz
 //
 // The first line is a header naming the Crosspoint commit. Every other line is one scenario: the MORPH context
 // the scenario corresponds to, and the outcome crosspointd's own Core.manualTake / manualRelease produced for it.
@@ -13,6 +13,11 @@ import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const root = resolve(process.argv[2] || "../crosspoint");
+// --shadow LOG: also attach crosspointd's own decision log (server/src/decisionlog.mjs) to every Core and drive each
+// scenario through it, so tools/shadow_check.py can be checked end to end against the log crosspointd itself writes.
+const shadowAt = process.argv.indexOf("--shadow");
+const shadowPath = shadowAt > 0 ? resolve(process.argv[shadowAt + 1]) : null;
+const attachDecisionLog = shadowPath ? (await import(pathToFileURL(join(root, "server/src/decisionlog.mjs")).href)).attachDecisionLog : null;
 const { Core } = await import(pathToFileURL(join(root, "server/src/core.mjs")).href);
 const commit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
 
@@ -55,20 +60,25 @@ async function decide(scenario) {
 
   core.sendCommand = async (command) => ({ command });
   core.remote = { command: async ({ action }) => ({ forwarded: action }) };
+  const shadow = attachDecisionLog?.(core, shadowPath);
 
-  let result;
   try {
-    result = request.action === "take"
-      ? await core.manualTake({ destination: d.id, source: s.id, force: request.force })
-      : await core.manualRelease({ destination: d.id, force: request.force });
-  } catch (error) {
-    if (!error.status) throw error;
-    return outcomeOfError(error);
+    let result;
+    try {
+      result = request.action === "take"
+        ? await core.manualTake({ destination: d.id, source: s.id, force: request.force })
+        : await core.manualRelease({ destination: d.id, force: request.force });
+    } catch (error) {
+      if (!error.status) throw error;
+      return outcomeOfError(error);
+    }
+    if (result.forwarded) return { status: "allow", action: `forward_${result.forwarded}` };
+    const { action, force, extra } = result.command;
+    if (action === "propose") return { status: "allow", action: `propose_${extra.propose}` };
+    return { status: "allow", action: force ? `forced_${action}` : action };
+  } finally {
+    await shadow?.flush();   // every scenario's log line lands before the next scenario starts
   }
-  if (result.forwarded) return { status: "allow", action: `forward_${result.forwarded}` };
-  const { action, force, extra } = result.command;
-  if (action === "propose") return { status: "allow", action: `propose_${extra.propose}` };
-  return { status: "allow", action: force ? `forced_${action}` : action };
 }
 
 function* scenarios() {
