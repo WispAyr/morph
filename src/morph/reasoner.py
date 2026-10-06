@@ -159,6 +159,14 @@ class _PredicateTranslator:
             return self._expression(values) if values is not None else []
         if name == "exprlist":
             return [self._expression(child) for child in children]
+        if name == "ident_arg" and len(children) == 2 and str(children[0]) == "has":
+            if not isinstance(children[1], Tree) or len(children[1].children) != 1:
+                raise _UnsupportedExpression("has() takes one field path")
+            path = self._path(children[1].children[0])
+            if path not in self.types:
+                raise _UnsupportedExpression(f"no supported declared type for '{path}'")
+            # Presence is the same variable that guards every read of the field, so has(x) && x is exact.
+            return _GuardedValue(z3.Bool(f"{path}__present"), z3.BoolVal(True))
         if name == "ident_arg" and len(children) == 2 and str(children[0]) == "size":
             arguments = self._expression(children[1])
             if len(arguments) != 1 or not isinstance(arguments[0], _GuardedValue):
