@@ -1,6 +1,6 @@
 // Record what crosspointd's automatic rules engine decides on one tick.
 //
-// Usage: node tools/crosspointd_rules_oracle.mjs /path/to/crosspoint | gzip -n -9 > tests/fixtures/crosspointd_rule_decisions.jsonl.gz
+// Usage: node tools/crosspointd_rules_oracle.mjs /path/to/crosspoint [--shadow LOG] | gzip -n -9 > tests/fixtures/crosspointd_rule_decisions.jsonl.gz
 //
 // The first line is a header naming the Crosspoint commit. Every other line is one scenario: the MORPH context it
 // corresponds to, and what Core.runRules did for one rule and its destination: the command it sent, if any, and the
@@ -16,6 +16,11 @@ import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const root = resolve(process.argv[2] || "../crosspoint");
+// --shadow LOG: also attach crosspointd's own decision log (server/src/decisionlog.mjs) to every Core, as in
+// tools/crosspointd_oracle.mjs.
+const shadowAt = process.argv.indexOf("--shadow");
+const shadowPath = shadowAt > 0 ? resolve(process.argv[shadowAt + 1]) : null;
+const attachDecisionLog = shadowPath ? (await import(pathToFileURL(join(root, "server/src/decisionlog.mjs")).href)).attachDecisionLog : null;
 const { Core } = await import(pathToFileURL(join(root, "server/src/core.mjs")).href);
 const commit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
 const dataDir = mkdtempSync(join(tmpdir(), "crosspointd-rules-oracle-"));
@@ -46,7 +51,7 @@ function kindOf(text) {
   return match[1];
 }
 
-function decide({ rule, destination, candidate, current_source, route, retry }) {
+async function decide({ rule, destination, candidate, current_source, route, retry }) {
   const core = new Core({ node: { id: "studio" }, dataDir, hub: { rtsp: "rtsp://hub", whep: "http://hub" }, hubPoller: null });
   core.closed = true;
   const r = { id: "r1", name: "Callers to CAM 5", enabled: rule.enabled, match: { kind: "caller" }, destination: "studio/cam5", policy: rule.policy, release: rule.release };
@@ -80,7 +85,9 @@ function decide({ rule, destination, candidate, current_source, route, retry }) 
 
   const commands = [];
   core.sendCommand = (command) => { commands.push(command); return new Promise(() => {}); };
+  const shadow = attachDecisionLog?.(core, shadowPath);
   core.runRules();
+  await shadow?.flush();
   if (commands.length > 1) throw new Error("more than one command in one tick");
   return { command: commands[0]?.action ?? null, level: st.status.level, kind: kindOf(st.status.text) };
 }
@@ -113,7 +120,7 @@ function* scenarios() {
 process.stdout.write(JSON.stringify({ crosspoint_commit: commit, generator: "tools/crosspointd_rules_oracle.mjs" }) + "\n");
 let count = 0;
 for (const scenario of scenarios()) {
-  process.stdout.write(JSON.stringify({ ...scenario, outcome: decide(scenario) }) + "\n");
+  process.stdout.write(JSON.stringify({ ...scenario, outcome: await decide(scenario) }) + "\n");
   count += 1;
 }
 rmSync(dataDir, { recursive: true, force: true });

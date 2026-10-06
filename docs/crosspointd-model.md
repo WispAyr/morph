@@ -57,6 +57,12 @@ Eight decision invariants state the engine's safety rules:
 
 Removing the policy behind any of them breaks it in simulation. Reordering the on-air and in-flight checks breaks no invariant, but disagrees with crosspointd in 160 scenarios.
 
+## Shadow mode and Crosspoint CI
+
+crosspointd can log every routing decision it makes (Crosspoint `docs/decision-log.md`). The log is off unless the config's `decisionLog` names a file. Each line holds the inputs in these models' shape and crosspointd's raw outcome. `tools/shadow_check.py LOG` re-decides every record with these models and exits 1 if any decision differs, so the models can be checked against real traffic before MORPH is trusted with a decision.
+
+`tests/test_shadow_check.py` drives all 8,640 oracle scenarios through crosspointd's own decision log (`--shadow` on both oracles) when `CROSSPOINT_DIR` is set, and requires MORPH to re-decide every one identically. Crosspoint's `.github/workflows/routing-model.yml` runs that test and both re-record tests on every Crosspoint push and pull request. A change to a routing decision therefore fails Crosspoint's CI until this model and its fixtures are updated with it.
+
 ## Not yet covered
 
 - Proposal resolution: taken, declined, expired, cancelled, superseded, withdrawn.
