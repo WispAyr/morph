@@ -373,8 +373,72 @@ class MORPHIR:
             } for item in self.invariants if isinstance(item, dict)],
         }
 
+    SUBJECT_KINDS = ("policy", "invariant", "action", "capability", "entity", "field", "transition")
+
     def impact(self, subject: str) -> dict[str, Any]:
         """Return what depends on or affects a semantic subject.
+
+        The subject may be bare (``source``, ``source.latency_ms``, a capability, action, policy, or
+        invariant name) or written as ``kind:name`` (``policy:deny_on_air``, ``field:source.kind``,
+        ``invariant:...``, ``action:...``, ``capability:...``, ``entity:...``, ``transition:<entity>.<event>``).
+        A policy or invariant is expanded to the fields it reads: what reads those fields is what a
+        change to it interacts with. It is reported itself, a policy with the action it selects and
+        the capabilities that action and its grants use, and every invariant that reads the decision
+        is affected by any policy.
+        """
+        if not isinstance(subject, str) or not subject:
+            raise TypeError("subject must be a non-empty string")
+        kind, _, name = subject.partition(":")
+        if kind not in self.SUBJECT_KINDS or not name:
+            kind, name = None, subject
+        policies = {p.get("name"): p for p in self.policies if isinstance(p, dict) and p.get("name")}
+        invariants = {i.get("name"): i for i in self.invariants if isinstance(i, dict) and i.get("name")}
+        if kind is None and name in policies:
+            kind = "policy"
+        elif kind is None and name in invariants:
+            kind = "invariant"
+
+        if kind == "policy":
+            if name not in policies:
+                raise KeyError(f"no policy named '{name}'")
+            return self._impact_of_paths(subject, _condition_paths(policies[name].get("when")), policy=name)
+        if kind == "invariant":
+            if name not in invariants:
+                raise KeyError(f"no invariant named '{name}'")
+            paths = {path for path in _condition_paths(invariants[name].get("when")) if _root(path) != DECISION_ROOT}
+            return self._impact_of_paths(subject, paths, invariant=name)
+        if kind == "transition":
+            name = name.split(".", 1)[0]
+        result = self._impact_path(name)
+        result["subjects"] = [subject]
+        return result
+
+    def _impact_of_paths(self, subject: str, paths: set[str], *, policy: str | None = None, invariant: str | None = None) -> dict[str, Any]:
+        """The union of the impact of each path, plus the policy or invariant the paths came from."""
+        merged: dict[str, list[str]] = {key: [] for key in ("entities", "policies", "capabilities", "actions", "invariants")}
+
+        def add(key: str, values: list[str]) -> None:
+            merged[key].extend(value for value in values if value not in merged[key])
+
+        for path in sorted(paths):
+            part = self._impact_path(path)
+            for key in merged:
+                add(key, part[key])
+        index = self._dependency_index()
+        if policy is not None:
+            add("policies", [policy])
+            action = index["policies"].get(policy, {}).get("action")
+            if action in index["actions"]:
+                add("actions", [action])
+                add("capabilities", [c for c in [index["actions"][action]["capability"]] if c in index["capabilities"]])
+            add("capabilities", [c for c in index["policies"].get(policy, {}).get("requires", []) if c in index["capabilities"]])
+            add("invariants", [name for name, reads in index["invariants"].items() if any(_root(p) == DECISION_ROOT for p in reads)])
+        if invariant is not None:
+            add("invariants", [invariant])
+        return {"subjects": [subject], "reads": sorted(paths), **merged}
+
+    def _impact_path(self, subject: str) -> dict[str, Any]:
+        """What reads, or is read by, an entity, field path, capability, or action.
 
         The subject may be an entity (``source``), a field path (``source.latency_ms``), a
         capability, or an action name. A policy, capability, action, invariant, or entity

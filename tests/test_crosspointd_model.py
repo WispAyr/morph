@@ -5,6 +5,7 @@ tools/crosspointd_oracle.mjs. Set CROSSPOINT_DIR to a Crosspoint checkout to als
 and fail when crosspointd's behaviour has drifted from the fixture.
 """
 
+import functools
 import gzip
 import json
 import os
@@ -29,6 +30,7 @@ def _runtime():
     )
 
 
+@functools.lru_cache(maxsize=1)
 def _records():
     lines = gzip.decompress(FIXTURE.read_bytes()).decode("utf-8").splitlines()
     return json.loads(lines[0]), [json.loads(line) for line in lines[1:]]
@@ -83,6 +85,14 @@ def test_every_recorded_scenario_satisfies_the_safety_invariants():
     assert model.simulate(_contexts(records))["failed"] == []
 
 
+@functools.lru_cache(maxsize=1)
+def _deciding_policies():
+    """Each recorded scenario's context with the baseline policy that decides it."""
+    _, records = _records()
+    runtime = _runtime()
+    return tuple((context, runtime.evaluate(context)["policy"]) for context in _contexts(records))
+
+
 @pytest.mark.parametrize("policy, invariant", [
     ("deny_on_air", "on_air_changed_only_with_force"),
     ("deny_in_flight", "no_command_while_one_is_in_flight"),
@@ -91,11 +101,12 @@ def test_every_recorded_scenario_satisfies_the_safety_invariants():
     ("deny_screen_needs_layout", "screens_take_only_layouts"),
 ])
 def test_dropping_a_safety_policy_breaks_its_invariant(policy, invariant):
-    _, records = _records()
     data = load_system_definition(MODEL).to_dict()
     data["policies"] = [item for item in data["policies"] if item["name"] != policy]
+    # Dropping a policy changes only the scenarios it decided, so only those need simulating again.
+    affected = [context for context, deciding in _deciding_policies() if deciding == policy]
 
-    failed = MORPHIR.from_dict(data).simulate(_contexts(records))["failed"]
+    failed = MORPHIR.from_dict(data).simulate(affected)["failed"]
 
     assert failed and any(invariant in item["invariants"] for item in failed)
 

@@ -512,3 +512,23 @@ def test_semantic_reasoner_proves_typed_relationships_and_preserves_unknown():
         "invariants": [{"name": "grace", "when": "session.minutes >= 11"}],
     })
     assert integer_baseline.diff(integer_candidate) == {"preserved": ["grace"], "added": [], "blocked": []}
+
+
+def test_impact_accepts_kind_prefixed_subjects_and_expands_policies_and_invariants():
+    from pathlib import Path
+
+    from morph import load_system_definition
+
+    model = load_system_definition(Path(__file__).parents[1] / "src/morph/examples/crosspointd.yaml")
+
+    assert model.impact("field:destination.peer")["policies"] == model.impact("destination.peer")["policies"]
+    by_policy = model.impact("policy:forward_take")
+    assert by_policy["subjects"] == ["policy:forward_take"] and set(by_policy["reads"]) == {"request.action", "destination.peer"}
+    assert {"forward_take", "forward_release"} <= set(by_policy["policies"])
+    assert "forward_to_owner" in by_policy["capabilities"]
+    assert "peer_destinations_are_forwarded" in by_policy["invariants"]
+    assert model.impact("forward_take")["reads"] == by_policy["reads"]
+    by_invariant = model.impact("invariant:screens_take_only_layouts")
+    assert "screens_take_only_layouts" in by_invariant["invariants"] and "deny_screen_needs_layout" in by_invariant["policies"]
+    with pytest.raises(KeyError):
+        model.impact("policy:no_such_policy")
