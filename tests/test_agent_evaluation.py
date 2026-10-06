@@ -328,3 +328,30 @@ def test_score_runs_rejects_an_evaluation_for_a_different_task():
     evaluations = [_evaluation("direct_source"), {**_evaluation("morph_mediated"), "task_id": "other"}]
     with pytest.raises(ValueError, match="different task"):
         score_runs(runs, {"tasks": {"pilot": {"affected_subjects": [], "relationship": "broader"}}}, evaluations)
+
+
+def test_scorer_cli_scores_a_single_pilot_task_as_partial(tmp_path):
+    import subprocess
+    import sys
+
+    root = Path(__file__).parents[1]
+    corpus = root / "benchmarks/agent-study/corpus.json"
+    tasks = json.loads(corpus.read_text())["tasks"]
+    pilot = "crosspointd-screen-accepts-raw-sources"
+    reference = tmp_path / "reference.json"
+    reference.write_text(json.dumps({"tasks": {
+        task["task_id"]: {"category": task["category"], "relationship": "broader", "affected_subjects": []} for task in tasks
+    }}))
+    runs = [{**_run(arm, affected=[]), "task_id": pilot} for arm in ("direct_source", "morph_mediated")]
+    (tmp_path / "runs.jsonl").write_text("".join(json.dumps(run) + "\n" for run in runs))
+    (tmp_path / "evaluations.jsonl").write_text("".join(json.dumps(_evaluation(arm)) + "\n" for arm in ("direct_source", "morph_mediated")))
+    command = [sys.executable, str(root / "benchmarks/score_agent_runs.py"), str(tmp_path / "runs.jsonl"),
+               "--evaluations", str(tmp_path / "evaluations.jsonl"), "--reference", str(reference), "--corpus", str(corpus)]
+
+    whole = subprocess.run(command + ["--allow-development-fixtures"], capture_output=True, text=True)
+    pilot_only = subprocess.run(command + ["--task", pilot], capture_output=True, text=True)
+
+    assert whole.returncode != 0 and "coverage does not match corpus" in whole.stderr
+    assert pilot_only.returncode == 0, pilot_only.stderr
+    result = json.loads(pilot_only.stdout)
+    assert result["corpus"] == {"tasks": 1, "task_ids": [pilot], "development_fixtures": [], "partial": True}

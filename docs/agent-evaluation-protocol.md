@@ -58,7 +58,7 @@ Gate outcomes belong to the evaluator, not the agent, so they live in a separate
 
 The record also lists the evaluated files with their hashes, every changed file, files changed outside the boundary, regressions, acceptance-test failures, simulation failures, and per-invariant outcomes, so a reviewer can see why each gate passed or failed.
 
-`simulation_passed` is `null` when the candidate declares no invariants or the reference has no scenarios; the scorer reports its rate over the runs where it applies. The scorer rejects a run record that carries `judge` or `evaluation` fields, requires exactly one evaluation for every run and no evaluation without a run, and requires one `direct_source` and one `morph_mediated` run per `pair_id`. Score a run file with:
+The scorer rejects a run record that carries `judge` or `evaluation` fields, requires exactly one evaluation for every run and no evaluation without a run, and requires one `direct_source` and one `morph_mediated` run per `pair_id`. Score a run file with:
 
 ```bash
 python benchmarks/score_agent_runs.py runs.jsonl \
@@ -161,6 +161,42 @@ Keep the evaluator reference and hidden acceptance tests outside the agent-visib
 Before source access in the MORPH-mediated arm, the agent records affected entities, policies, capabilities, state transitions, invariants, expected behavior, simulation scenarios, assumptions, and unresolved questions. Every invariant claim includes MORPH evidence or is marked UNKNOWN. Preserve this artifact so the later implementation cannot rewrite the agent's initial impact estimate.
 
 MORPH's UNKNOWN result is recorded as unresolved, never converted into PASS. The same MORPH judge runs on both arms after implementation; for the direct-source arm, it evaluates the resulting candidate definition and implementation.
+
+## Running a Pilot Pair
+
+`benchmarks/adapters/claude_code.py` runs each arm with Claude Code in headless mode. Both arms get the same model, instructions, and tools, except that the MORPH-mediated arm may run the `morph` CLI and, before freezing its prediction, sees only the task and the MORPH definition (and may write scratch files there). Claude Code runs with `--safe-mode` and `--strict-mcp-config`, so no CLAUDE.md, skill, plugin, hook, memory, or MCP server reaches either arm, and inherited Claude Code session variables are removed.
+
+1. **Prepare private evaluator storage** outside the repository: `reference.json` with labels for every corpus task, `manifest.json`, and the hidden tests the manifest names. Labels for a new task are merged into both files.
+2. **Run the pair** in a disposable container that has the repository, `git`, Python with `pip install -e .[dev]` (so `morph` is on PATH), Claude Code, and credentials, and that cannot see the private evaluator storage:
+
+   ```bash
+   python benchmarks/run_paired_task.py crosspointd-screen-accepts-raw-sources pilot-001 \
+     --adapter python --adapter-arg benchmarks/adapters/claude_code.py \
+     --adapter-arg --model --adapter-arg claude-opus-5-5 \
+     --pass-env HOME --pass-env ANTHROPIC_API_KEY --output-dir /private/morph-runs
+   ```
+
+3. **Finalize** in a separate disposable container that can see the pair directory and the private evaluator storage, but has no credentials:
+
+   ```bash
+   python benchmarks/finalize_paired_run.py /private/morph-runs/pilot-001/pair.json \
+     --evaluator-config /private/morph-evaluator/manifest.json \
+     --reference /private/morph-evaluator/reference.json \
+     --output /private/morph-results/pilot-001.runs.jsonl \
+     --evaluations-output /private/morph-results/pilot-001.evaluations.jsonl
+   ```
+
+4. **Score just the pilot task**; `--task` limits coverage checks to the tasks named and marks the result partial:
+
+   ```bash
+   python benchmarks/score_agent_runs.py /private/morph-results/pilot-001.runs.jsonl \
+     --evaluations /private/morph-results/pilot-001.evaluations.jsonl \
+     --reference /private/morph-evaluator/reference.json \
+     --corpus benchmarks/agent-study/corpus.json \
+     --task crosspointd-screen-accepts-raw-sources --pretty
+   ```
+
+5. **Inspect by hand** before scaling: both frozen `pre_implementation.json` files, each arm's `patch.diff`, the evaluation records (changed and out-of-boundary files, regressions, hidden-test failures, per-invariant outcomes), and the scorer output.
 
 ## Judge Gates
 

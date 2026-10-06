@@ -264,12 +264,18 @@ def main() -> int:
     parser.add_argument("--evaluations", type=Path, required=True, help="JSON Lines produced by the independent evaluator")
     parser.add_argument("--corpus", type=Path, required=True, help="Versioned task corpus index to validate against")
     parser.add_argument("--allow-development-fixtures", action="store_true", help="Allow explicitly marked fixtures; results are not benchmark evidence")
+    parser.add_argument("--task", action="append", default=[], metavar="TASK_ID", help="Score only these corpus tasks, for a pilot; repeat as needed. The result is marked partial")
     parser.add_argument("--pretty", action="store_true")
     args = parser.parse_args()
 
     try:
         reference = json.loads(args.reference.read_text(encoding="utf-8"))
         corpus_tasks = _read_corpus(args.corpus, reference)
+        if args.task:
+            unknown = sorted(set(args.task) - set(corpus_tasks))
+            if unknown:
+                raise ValueError(f"--task names tasks that are not in the corpus: {unknown}")
+            corpus_tasks = {task_id: task for task_id, task in corpus_tasks.items() if task_id in args.task}
         fixture_tasks = sorted(
             task_id for task_id, task in corpus_tasks.items()
             if task["evaluation_status"] == "development_fixture"
@@ -289,6 +295,7 @@ def main() -> int:
             "tasks": len(corpus_tasks),
             "task_ids": sorted(corpus_tasks),
             "development_fixtures": fixture_tasks,
+            "partial": bool(args.task),
         }
     except (OSError, ValueError, TypeError) as exc:
         parser.error(str(exc))

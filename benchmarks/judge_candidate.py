@@ -52,8 +52,8 @@ def _policy_context(case: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _policy_result(definition: Any, case: dict[str, Any]) -> str:
-    runtime = MORPHRuntime(
+def _runtime(definition: Any) -> MORPHRuntime:
+    return MORPHRuntime(
         name=definition.name,
         version=definition.version,
         policies=definition.policies,
@@ -61,7 +61,18 @@ def _policy_result(definition: Any, case: dict[str, Any]) -> str:
         entities=definition.entities,
         actions=definition.actions,
     )
-    return runtime.evaluate(_policy_context(case))["status"]
+
+
+def _policy_result(definition: Any, case: dict[str, Any]) -> str:
+    return _runtime(definition).evaluate(_policy_context(case))["status"]
+
+
+def _decision_outcome(definition: Any, case: dict[str, Any]) -> str:
+    """``allow:<action>`` or ``deny:<reason>`` for a case that supplies its own context."""
+    decision = _runtime(definition).evaluate(case["context"])
+    if decision["status"] == "allow":
+        return f"allow:{decision.get('action')}"
+    return f"deny:{decision.get('reason') or ''}"
 
 
 def _transition_result(definition: Any, case: dict[str, Any]) -> str:
@@ -91,6 +102,8 @@ def _transition_result(definition: Any, case: dict[str, Any]) -> str:
 
 
 def _case_result(definition: Any, case: dict[str, Any]) -> str:
+    if "context" in case:
+        return _decision_outcome(definition, case)
     if "baseline_status" in case:
         return _policy_result(definition, case)
     if "starting_state" in case:
@@ -128,8 +141,8 @@ def judge_candidate(
     candidate = load_system_definition(candidate_path)
     results = []
     for index, case in enumerate(cases):
-        baseline_expected = case.get("baseline_status", case.get("baseline_state"))
-        candidate_expected = case.get("candidate_status", case.get("candidate_state"))
+        baseline_expected = case.get("baseline_outcome", case.get("baseline_status", case.get("baseline_state")))
+        candidate_expected = case.get("candidate_outcome", case.get("candidate_status", case.get("candidate_state")))
         baseline_actual = _case_result(baseline, case)
         candidate_actual = _case_result(candidate, case)
         baseline_passed = baseline_actual == baseline_expected
