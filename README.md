@@ -36,7 +36,7 @@ morph compile demo.yaml --target node
 
 Installation needs a virtual environment or user site on Debian-based systems, because a dependency pins PyYAML and the system copy cannot be replaced.
 
-The CLI gives MORPH a real developer workflow: initialize a YAML definition, scaffold a reusable project, evaluate it against a context, and compile it into Python, Node, or SQL execution targets. `morph run` exits 0 on an allow decision and 2 on a deny, so it can gate scripts directly.
+The CLI gives MORPH a real developer workflow: initialize a YAML definition, scaffold a reusable project, evaluate it against a context, and compile it into an execution plan for the Python, Node, or SQL target. `morph run` exits 0 on an allow decision and 2 on a deny, so it can gate scripts directly.
 
 ## Definition format
 
@@ -124,15 +124,18 @@ from morph import EventStore, MORPHSystem
 system = MORPHSystem(definition, adapters, EventStore("crosspoint.jsonl"))
 system.observe("source", "cam1", status="live", latency_ms=40)
 system.observe("destination", "wall", status="ready", latency_ms=60)
+system.observe("operator", "ewan", capabilities=["route_control"])
 result = system.act(source="cam1", destination="wall", operator="ewan")
 system.state("destination", "wall")          # {'id': 'wall', ..., 'state': 'routed'}
 system.history(kinds=["transitioned"])
 ```
 
-Transitions fire on `observed` and on `<action>.<outcome>` events (`succeeded`, `failed`, `skipped`, `denied`). Their `when` may read the entity, the rest of the context, and `event`. By default a transition targets the instance bound under its entity name in the context; `id: <expression>` targets another. YAML parses a bare `on:` key as boolean, which the loader tolerates, but quoting it as `"on":` avoids editor confusion. The same is available from the command line:
+Transitions fire on `observed` and on `<action>.<outcome>` events (`succeeded`, `failed`, `skipped`, `denied`). An `unbound` result, where a decision names an action with no binding, is logged as an effect record but fires no transition, because nothing ran. A transition's `when` may read the entity, the rest of the context, and `event`. By default a transition targets the instance bound under its entity name in the context; `id: <expression>` targets another. YAML parses a bare `on:` key as boolean, which the loader tolerates, but quoting it as `"on":` avoids editor confusion. The same is available from the command line:
 
 ```bash
 morph system crosspoint.yaml --store events.jsonl observe source cam1 status=live latency_ms=40
+morph system crosspoint.yaml --store events.jsonl observe destination wall status=ready latency_ms=60
+morph system crosspoint.yaml --store events.jsonl observe operator ewan 'capabilities=[route_control]'
 morph system crosspoint.yaml --store events.jsonl act --adapters morph.examples.crosspoint:adapters source=cam1 destination=wall operator=ewan
 morph system crosspoint.yaml --store events.jsonl state destination wall
 morph system crosspoint.yaml --store events.jsonl history --kind transitioned
@@ -145,7 +148,8 @@ morph system crosspoint.yaml --store events.jsonl history --kind transitioned
 - Once a definition declares `entities`, every field a policy reads must be declared, and this is checked when the definition loads. A context whose declared fields carry the wrong type is denied with reason `invalid_context` before any policy runs.
 - Capabilities resolve through `operator.capabilities` unless the definition declares the capability under `capabilities` with its own `requires` context paths.
 - Every entry point (runtime, planner, workflow, state machine, compiler, CLI) validates the definition before evaluating it. `morph validate` runs the same checks on their own, and `morph run --explain` shows how each policy fared.
-- Compiled plans carry each policy's normalised CEL condition and the entity schema, so the Python and Node targets reach the same decision as the runtime. The SQL target only translates structured clause lists, emits one parameterised statement per policy, and refuses `contains`.
+- Compiled plans are language-neutral JSON carrying each policy's normalised CEL condition, the entity schema, capabilities, and action bindings. The Python, Node, and SQL target classes all execute that plan in-process with the runtime's semantics as the reference. MORPH does not yet ship a JavaScript evaluator, so a Node service consumes the plan with its own CEL library. The SQL target additionally emits one parameterised statement per policy, but only for structured clause lists, and refuses `contains`.
+- `morph impact definition.yaml SUBJECT` lists the entities, policies, actions, capabilities, and invariants that read an entity, field path, capability, or action. Matching uses the exact paths compiled from each CEL expression, so `route.lock` does not match `route.locked`. Policies may also declare `depends_on` and `affects` lists, and capabilities an `affects` list. Impact analysis includes those annotations, and the runtime ignores them.
 - The semantic model also supports `intent` and `invariants`. `morph inspect` reports the system-level model, `morph simulate --context scenarios.yaml` checks invariants over example contexts, and `morph diff baseline.yaml candidate.yaml` reports `preserved`, `added`, and `blocked` invariants so an AI change can be reviewed before it is accepted.
 
 `SemanticReasoner` provides deterministic proofs for a deliberately limited typed CEL fragment: Boolean logic, scalar comparisons, and literal-list membership over declared `bool`, `int`, `double`, and `string` fields. For example, `x > 10` and `x >= 11` are equivalent when `x` is declared `int`, but not when it is `double`. Field presence is part of the reasoning model because MORPH allows declared context fields to be absent. Unsupported syntax, undeclared types, and external capability semantics return `relationship: unknown` with `confidence: unknown`; they are never treated as proof of safety. `MORPHIR.diff()` preserves a rewritten invariant only when equivalence is proven.

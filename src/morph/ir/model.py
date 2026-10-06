@@ -4,10 +4,48 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
-from morph.expressions import compile_when
-from morph.expressions import when_to_cel
+from morph.expressions import ExpressionError, compile_value, compile_when, when_to_cel
 from morph.reasoner import SemanticReasoner
 from morph.schema import Schema
+
+
+def _string_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value] if value else []
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, str) and item]
+    return []
+
+
+def _condition_paths(when: Any) -> set[str]:
+    """The context paths a condition reads, or nothing if it does not compile."""
+    try:
+        return set(compile_when(when).paths)
+    except ExpressionError:
+        return set()
+
+
+def _input_paths(inputs: Any) -> set[str]:
+    """The context paths an action's input bindings read. Literal inputs read nothing."""
+    paths: set[str] = set()
+    if not isinstance(inputs, dict):
+        return paths
+    for binding in inputs.values():
+        if isinstance(binding, str):
+            try:
+                paths.update(compile_value(binding).paths)
+            except ExpressionError:
+                continue
+    return paths
+
+
+def _touches(subject: str, path: str) -> bool:
+    """True when a dotted path reads the subject, part of it, or something inside it."""
+    return path == subject or path.startswith(f"{subject}.") or subject.startswith(f"{path}.")
+
+
+def _root(path: str) -> str:
+    return path.split(".", 1)[0]
 
 
 @dataclass
@@ -193,19 +231,61 @@ class MORPHIR:
         """Alias for inspect()."""
         return self.inspect()
 
-    def semantic_map(self) -> dict[str, Any]:
-        """Return a semantic dependency map for AI reasoning about the system."""
-        entity_map: dict[str, dict[str, Any]] = {}
-        entity_names = {entity.get("name") for entity in self.entities if isinstance(entity, dict) and entity.get("name")}
-
+    def _dependency_index(self) -> dict[str, Any]:
+        """Exact context paths each part of the definition reads, from the compiled CEL."""
+        policies: dict[str, dict[str, Any]] = {}
+        for index, policy in enumerate(self.policies):
+            if not isinstance(policy, dict):
+                continue
+            name = policy.get("name") or f"policy[{index}]"
+            result = policy.get("result") if isinstance(policy.get("result"), dict) else {}
+            policies[name] = {
+                "reads": _condition_paths(policy.get("when")) | set(_string_list(policy.get("depends_on"))),
+                "affects": set(_string_list(policy.get("affects"))),
+                "requires": _string_list(policy.get("requires")),
+                "action": result.get("action"),
+            }
+        capabilities: dict[str, dict[str, Any]] = {}
+        for name, spec in (self.capabilities or {}).items():
+            if not isinstance(spec, dict):
+                continue
+            capabilities[name] = {
+                "reads": set(_string_list(spec.get("requires"))),
+                "affects": set(_string_list(spec.get("affects"))),
+            }
+        actions: dict[str, dict[str, Any]] = {}
+        for name, spec in (self.actions or {}).items():
+            if not isinstance(spec, dict):
+                continue
+            actions[name] = {"reads": _input_paths(spec.get("inputs")), "capability": spec.get("capability")}
+        invariants: dict[str, set[str]] = {}
+        for index, item in enumerate(self.invariants):
+            if isinstance(item, dict):
+                invariants[item.get("name") or f"invariant[{index}]"] = _condition_paths(item.get("when"))
+        transitions: dict[str, set[str]] = {}
         for entity in self.entities:
-            if not isinstance(entity, dict):
+            if not isinstance(entity, dict) or not entity.get("name"):
                 continue
-            name = entity.get("name")
-            if not name:
+            reads: set[str] = set()
+            for transition in entity.get("transitions") or []:
+                if isinstance(transition, dict) and transition.get("when") is not None:
+                    reads |= {path for path in _condition_paths(transition["when"]) if _root(path) != "event"}
+            transitions[entity["name"]] = reads
+        return {"policies": policies, "capabilities": capabilities, "actions": actions, "invariants": invariants, "transitions": transitions}
+
+    def semantic_map(self) -> dict[str, Any]:
+        """Return a semantic dependency map for AI reasoning about the system.
+
+        Each entity lists the policies, capabilities, and actions that read it. Reads come from
+        the compiled CEL conditions and input bindings plus any declared ``depends_on``.
+        """
+        index = self._dependency_index()
+        entity_map: dict[str, dict[str, Any]] = {}
+        for entity in self.entities:
+            if not isinstance(entity, dict) or not entity.get("name"):
                 continue
-            entity_map[name] = {
-                "name": name,
+            entity_map[entity["name"]] = {
+                "name": entity["name"],
                 "fields": entity.get("fields", {}),
                 "states": entity.get("states", []),
                 "transitions": entity.get("transitions", []),
@@ -214,48 +294,22 @@ class MORPHIR:
                 "actions": [],
             }
 
-        for policy in self.policies:
-            if not isinstance(policy, dict):
-                continue
-            name = policy.get("name", "unknown")
-            deps = policy.get("depends_on", [])
-            if not isinstance(deps, list):
-                deps = [deps] if deps else []
-            for dependency in deps:
-                target = dependency.split(".")[0] if isinstance(dependency, str) else None
-                if target in entity_names and target in entity_map:
-                    entity_map[target]["policies"].append(name)
+        def link(paths: set[str], kind: str, name: str) -> None:
+            for root in sorted({_root(path) for path in paths}):
+                if root in entity_map and name not in entity_map[root][kind]:
+                    entity_map[root][kind].append(name)
 
-            policy_entry = {
-                "name": name,
-                "when": policy.get("when"),
-                "depends_on": deps,
-                "affects": policy.get("affects", []),
-                "result": policy.get("result"),
-            }
-            entity_map.setdefault(name, {"name": name, "fields": {}, "states": [], "transitions": [], "policies": [], "capabilities": [], "actions": []})
-
-        for capability_name, capability_spec in (self.capabilities or {}).items():
-            if not isinstance(capability_spec, dict):
-                continue
-            for entity_name in entity_names:
-                if any(item.startswith(f"{entity_name}.") or item == entity_name for item in capability_spec.get("requires", []) + capability_spec.get("affects", [])):
-                    entity_map.setdefault(entity_name, {"name": entity_name, "fields": {}, "states": [], "transitions": [], "policies": [], "capabilities": [], "actions": []})
-                    entity_map[entity_name]["capabilities"].append(capability_name)
-
-        for action_name, action_spec in (self.actions or {}).items():
-            if not isinstance(action_spec, dict):
-                continue
-            capability_name = action_spec.get("capability")
-            if capability_name:
-                for entity_name in entity_names:
-                    if any(item.startswith(f"{entity_name}.") or item == entity_name for item in str(action_spec.get("inputs", {})).split("'")):
-                        entity_map.setdefault(entity_name, {"name": entity_name, "fields": {}, "states": [], "transitions": [], "policies": [], "capabilities": [], "actions": []})
-                        entity_map[entity_name]["actions"].append(action_name)
+        for name, entry in index["policies"].items():
+            link(entry["reads"], "policies", name)
+        for name, entry in index["capabilities"].items():
+            link(entry["reads"] | entry["affects"], "capabilities", name)
+        for name, entry in index["actions"].items():
+            link(entry["reads"], "actions", name)
 
         policy_map = {
             policy.get("name", "unknown"): {
                 "when": policy.get("when"),
+                "reads": sorted(index["policies"].get(policy.get("name"), {}).get("reads", set())),
                 "depends_on": policy.get("depends_on", []),
                 "affects": policy.get("affects", []),
                 "result": policy.get("result"),
@@ -264,8 +318,8 @@ class MORPHIR:
         }
         capability_map = {
             name: {
-                "requires": spec.get("requires", []),
-                "affects": spec.get("affects", []),
+                "requires": spec.get("requires") or [],
+                "affects": spec.get("affects") or [],
                 "inputs": spec.get("inputs", {}),
                 "outputs": spec.get("outputs", {}),
             }
@@ -275,14 +329,10 @@ class MORPHIR:
             name: {
                 "capability": spec.get("capability"),
                 "inputs": spec.get("inputs", {}),
+                "reads": sorted(index["actions"].get(name, {}).get("reads", set())),
             }
             for name, spec in (self.actions or {}).items() if isinstance(spec, dict)
         }
-
-        for entity_name, entity_data in entity_map.items():
-            entity_data["policies"] = list(dict.fromkeys(entity_data["policies"]))
-            entity_data["capabilities"] = list(dict.fromkeys(entity_data["capabilities"]))
-            entity_data["actions"] = list(dict.fromkeys(entity_data["actions"]))
 
         return {
             "name": self.name,
@@ -299,47 +349,67 @@ class MORPHIR:
         }
 
     def impact(self, subject: str) -> dict[str, Any]:
-        """Return the policies, capabilities, and actions that depend on or affect a semantic subject."""
-        if not isinstance(subject, str):
-            raise TypeError("subject must be a string")
+        """Return what depends on or affects a semantic subject.
 
-        affected = {
+        The subject may be an entity (``source``), a field path (``source.latency_ms``), a
+        capability, or an action name. A policy, capability, action, invariant, or entity
+        transition is affected when it reads the subject, part of it, or something inside it,
+        judged on exact CEL paths rather than text. Affected policies then pull in the actions
+        they select and the capabilities they require or invoke, because changing what a
+        policy reads changes when those effects run.
+        """
+        if not isinstance(subject, str) or not subject:
+            raise TypeError("subject must be a non-empty string")
+
+        index = self._dependency_index()
+        entities = [
+            entity.get("name") for entity in self.entities
+            if isinstance(entity, dict) and entity.get("name") and _touches(entity["name"], subject)
+        ]
+        entities += [
+            name for name, reads in index["transitions"].items()
+            if name not in entities and any(_touches(subject, path) for path in reads)
+        ]
+
+        def reads_subject(paths: set[str]) -> bool:
+            return any(_touches(subject, path) for path in paths)
+
+        policies = [
+            name for name, entry in index["policies"].items()
+            if reads_subject(entry["reads"]) or subject in entry["affects"]
+            or subject in entry["requires"] or subject == entry["action"]
+        ]
+        actions = [
+            name for name, entry in index["actions"].items()
+            if name == subject or entry["capability"] == subject or reads_subject(entry["reads"])
+        ]
+        capabilities = [
+            name for name, entry in index["capabilities"].items()
+            if name == subject or reads_subject(entry["reads"]) or subject in entry["affects"]
+        ]
+
+        for name in policies:
+            entry = index["policies"][name]
+            if entry["action"] in index["actions"] and entry["action"] not in actions:
+                actions.append(entry["action"])
+            for capability in entry["requires"]:
+                if capability in index["capabilities"] and capability not in capabilities:
+                    capabilities.append(capability)
+        for name in actions:
+            capability = index["actions"][name]["capability"]
+            if capability in index["capabilities"] and capability not in capabilities:
+                capabilities.append(capability)
+
+        invariants = [name for name, paths in index["invariants"].items() if reads_subject(paths)]
+
+        return {
             "subjects": [subject],
-            "entities": [],
-            "policies": [],
-            "capabilities": [],
-            "actions": [],
+            "entities": entities,
+            "policies": policies,
+            "capabilities": capabilities,
+            "actions": actions,
+            "invariants": invariants,
         }
-
-        for entity in self.entities:
-            if not isinstance(entity, dict):
-                continue
-            name = entity.get("name")
-            if name and (subject == name or subject.startswith(f"{name}.")):
-                affected["entities"].append(name)
-
-        for policy in self.policies:
-            if not isinstance(policy, dict):
-                continue
-            name = policy.get("name")
-            deps = policy.get("depends_on", [])
-            affects = policy.get("affects", [])
-            if subject in deps or subject in affects or (isinstance(policy.get("when"), str) and subject in policy["when"]):
-                affected["policies"].append(name)
-
-        for capability_name, capability_spec in (self.capabilities or {}).items():
-            if not isinstance(capability_spec, dict):
-                continue
-            if subject in capability_spec.get("requires", []) or subject in capability_spec.get("affects", []) or subject in str(capability_spec):
-                affected["capabilities"].append(capability_name)
-
-        for action_name, action_spec in (self.actions or {}).items():
-            if not isinstance(action_spec, dict):
-                continue
-            if subject in str(action_spec.get("inputs", {})) or subject == action_spec.get("capability"):
-                affected["actions"].append(action_name)
-
-        return affected
 
     def equivalent_to(self, candidate: "MORPHIR | dict[str, Any]") -> bool:
         """Return True when two MORPHIR objects carry the same semantic meaning."""
@@ -420,8 +490,6 @@ class MORPHIR:
 
         diff = self.diff(candidate)
         classification = self.classify_equivalence(candidate)
-        impact_subjects = sorted(set(self.impact("*").get("subjects", []) if False else []))
-        _ = impact_subjects
 
         status = "safe_to_review"
         if diff["blocked"]:

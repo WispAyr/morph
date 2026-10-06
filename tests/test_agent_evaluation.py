@@ -1,5 +1,6 @@
 import copy
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,7 @@ def _run(arm, *, affected, relationship="broader", tests_passed=True):
             "implementation_complete": True,
             "tests_passed": tests_passed,
             "simulation_passed": True,
+            "task_cases_passed": True,
             "invariants_status": "not_applicable",
         },
         "human_interventions": 0,
@@ -68,16 +70,92 @@ def test_score_runs_flags_unknown_relationship_overclaim():
     assert result["by_arm"]["morph_mediated"]["relationship_correct_rate"] == 1.0
 
 
-def test_crosspoint_pilot_reference_matches_semantics_and_decisions():
-    root = Path(__file__).parents[1]
-    reference = json.loads((root / "benchmarks/agent-study/reference.json").read_text(encoding="utf-8"))
-    task = reference["tasks"]["crosspoint-source-latency-150"]
-    baseline = load_system_definition(root / "src/morph/examples/crosspoint.yaml")
+ROOT = Path(__file__).parents[1]
+# The evaluator reference is deliberately kept outside the repository. Point this variable
+# at the private copy to also check the pilot against its labelled cases.
+REFERENCE_ENV = "MORPH_EVALUATOR_REFERENCE"
+
+
+def _latency_pilot_models():
+    baseline = load_system_definition(ROOT / "src/morph/examples/crosspoint.yaml")
     candidate_data = copy.deepcopy(baseline.to_dict())
     candidate_policy = next(policy for policy in candidate_data["policies"] if policy["name"] == "allow_live_route")
     candidate_policy["when"] = candidate_policy["when"].replace("source.latency_ms < 120", "source.latency_ms < 150")
-    candidate = MORPHIR.from_dict(candidate_data)
+    return baseline, MORPHIR.from_dict(candidate_data)
+
+
+def _runtime(model):
+    return MORPHRuntime(
+        name=model.name,
+        version=model.version,
+        policies=model.policies,
+        capabilities=model.capabilities,
+        entities=model.entities,
+        actions=model.actions,
+    )
+
+
+def _crosspoint_context(source_latency_ms, *, destination_latency_ms=60, destination_state="idle", route_locked=False, locked_by=""):
+    return {
+        "source": {"id": "cam1", "status": "live", "latency_ms": source_latency_ms},
+        "destination": {
+            "id": "wall",
+            "status": "ready",
+            "latency_ms": destination_latency_ms,
+            "source": "cam0",
+            "state": destination_state,
+        },
+        "route": {"locked": route_locked, "locked_by": locked_by},
+        "operator": {"id": "ewan", "capabilities": ["route_control"]},
+    }
+
+
+def test_crosspoint_latency_pilot_is_a_proven_broadening():
+    baseline, candidate = _latency_pilot_models()
+    baseline_when, candidate_when = (
+        next(p["when"] for p in model.policies if p["name"] == "allow_live_route") for model in (baseline, candidate)
+    )
+
+    analysis = SemanticReasoner().analyze(
+        baseline_when,
+        candidate_when,
+        types=MORPHIR._shared_semantic_types(baseline, candidate),
+    )
+    assert analysis["relationship"] == "broader"
+    assert analysis["confidence"] == "proven"
+
+    baseline_runtime, candidate_runtime = _runtime(baseline), _runtime(candidate)
+    # Inside the old bound both allow, in the new band only the candidate allows, and the
+    # guard policies still deny in both.
+    assert [r.evaluate(_crosspoint_context(100))["status"] for r in (baseline_runtime, candidate_runtime)] == ["allow", "allow"]
+    assert [r.evaluate(_crosspoint_context(130))["status"] for r in (baseline_runtime, candidate_runtime)] == ["deny", "allow"]
+    assert [r.evaluate(_crosspoint_context(150))["status"] for r in (baseline_runtime, candidate_runtime)] == ["deny", "deny"]
+    faulted = _crosspoint_context(100, destination_state="faulted")
+    assert [r.evaluate(faulted)["policy"] for r in (baseline_runtime, candidate_runtime)] == ["deny_faulted_destination"] * 2
+    locked = _crosspoint_context(100, route_locked=True, locked_by="someone_else")
+    assert [r.evaluate(locked)["policy"] for r in (baseline_runtime, candidate_runtime)] == ["deny_locked_route"] * 2
+
+    system = MORPHSystem(
+        candidate,
+        {
+            "route_control": lambda inputs: {"route_id": "route-1", "previous_source": "cam0"},
+            "notify": lambda inputs: {},
+        },
+    )
+    execution = system.act(_crosspoint_context(149))
+    assert execution.status == "executed"
+    assert system.state("destination", "wall")["state"] == "routed"
+
+
+def test_crosspoint_pilot_reference_matches_semantics_and_decisions():
+    reference_path = os.environ.get(REFERENCE_ENV)
+    if not reference_path or not Path(reference_path).is_file():
+        pytest.skip(f"set {REFERENCE_ENV} to the private evaluator reference to check labelled cases")
+    reference = json.loads(Path(reference_path).read_text(encoding="utf-8"))
+    task = reference["tasks"]["crosspoint-source-latency-150"]
+    baseline, candidate = _latency_pilot_models()
     baseline_policy = next(policy for policy in baseline.policies if policy["name"] == "allow_live_route")
+    candidate_policy = next(policy for policy in candidate.policies if policy["name"] == "allow_live_route")
 
     analysis = SemanticReasoner().analyze(
         baseline_policy["when"],
@@ -87,23 +165,15 @@ def test_crosspoint_pilot_reference_matches_semantics_and_decisions():
     assert analysis["relationship"] == task["relationship"]
     assert analysis["confidence"] == "proven"
 
-    runtimes = [
-        MORPHRuntime(name=model.name, version=model.version, policies=model.policies, capabilities=model.capabilities, entities=model.entities, actions=model.actions)
-        for model in (baseline, candidate)
-    ]
+    runtimes = [_runtime(model) for model in (baseline, candidate)]
     for case in task["cases"]:
-        context = {
-            "source": {"id": "cam1", "status": "live", "latency_ms": case["source_latency_ms"]},
-            "destination": {
-                "id": "wall",
-                "status": "ready",
-                "latency_ms": case["destination_latency_ms"],
-                "source": "cam0",
-                "state": case["destination_state"],
-            },
-            "route": {"locked": case["route_locked"], "locked_by": case.get("locked_by", "")},
-            "operator": {"id": "ewan", "capabilities": ["route_control"]},
-        }
+        context = _crosspoint_context(
+            case["source_latency_ms"],
+            destination_latency_ms=case["destination_latency_ms"],
+            destination_state=case["destination_state"],
+            route_locked=case["route_locked"],
+            locked_by=case.get("locked_by", ""),
+        )
         expected = (case["baseline_status"], case["candidate_status"])
         actual = tuple(runtime.evaluate(context)["status"] for runtime in runtimes)
         assert actual == expected

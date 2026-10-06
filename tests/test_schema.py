@@ -238,7 +238,10 @@ def test_morph_ir_can_inspect_and_simulate_system_semantics():
         {
             "name": "studio",
             "version": "0.8.0",
-            "entities": [{"name": "source", "fields": {"status": "string", "latency_ms": "int"}}],
+            "entities": [
+                {"name": "source", "fields": {"status": "string", "latency_ms": "int"}},
+                {"name": "operator", "fields": {"capabilities": "list"}},
+            ],
             "capabilities": {"route_control": {"requires": ["operator.capabilities"], "inputs": {"source": "string"}, "failures": ["blocked"]}},
             "actions": {"route_source": {"capability": "route_control", "inputs": {"source": "source.status"}}},
             "policies": [{"name": "allow_live", "when": 'source.status == "live" && source.latency_ms < 120', "result": {"status": "allow", "action": "route_source"}}],
@@ -347,6 +350,66 @@ def test_morph_ir_can_map_semantics_and_compute_impact():
 
     equivalent = system.equivalent_to(system)
     assert equivalent is True
+
+
+def test_impact_uses_exact_paths_and_follows_affected_policies_to_their_effects():
+    from morph import load_system_definition
+    from morph.examples.crosspoint import DEFINITION_PATH
+
+    crosspoint = load_system_definition(DEFINITION_PATH)
+
+    latency = crosspoint.impact("source.latency_ms")
+    assert latency["policies"] == ["allow_live_route"]
+    assert latency["actions"] == ["route_source"]
+    assert latency["capabilities"] == ["route_control"]
+
+    # A prefix of a field name is not the field.
+    near_miss = crosspoint.impact("route.lock")
+    assert near_miss["policies"] == [] and near_miss["actions"] == [] and near_miss["capabilities"] == []
+
+    # A whole entity matches every field read beneath it.
+    assert crosspoint.impact("route")["policies"] == ["deny_locked_route"]
+
+    # Capabilities are subjects too.
+    assert crosspoint.impact("route_control")["policies"] == ["allow_live_route"]
+
+    # The destination state machine reads its own state, so it is an affected entity.
+    assert "destination" in crosspoint.impact("destination.state")["entities"]
+
+
+def test_semantic_map_links_entities_from_compiled_paths_only():
+    from morph import load_system_definition
+    from morph.examples.crosspoint import DEFINITION_PATH
+
+    semantic_map = load_system_definition(DEFINITION_PATH).semantic_map()
+
+    assert set(semantic_map["entities"]) == {"source", "destination", "route", "operator"}
+    assert semantic_map["entities"]["source"]["policies"] == ["allow_live_route"]
+    assert semantic_map["entities"]["source"]["actions"] == ["route_source", "raise_alert"]
+    assert semantic_map["entities"]["operator"]["capabilities"] == ["route_control"]
+    assert semantic_map["actions"]["route_source"]["reads"] == ["destination.id", "operator.id", "source.id"]
+
+
+def test_capability_affects_annotation_is_accepted_by_the_runtime():
+    from morph import MORPHRuntime
+
+    runtime = MORPHRuntime.from_dict(
+        {
+            "entities": [{"name": "session", "fields": {"status": "string"}}],
+            "capabilities": {"enforce": {"requires": [], "affects": ["session.status"], "inputs": {"status": "string"}}},
+            "actions": {"evaluate": {"capability": "enforce", "inputs": {"status": "session.status"}}},
+            "policies": [{"name": "p", "when": 'session.status == "active"', "result": {"status": "allow", "action": "evaluate"}}],
+        }
+    )
+    assert runtime.capability_specs["enforce"].affects == ["session.status"]
+
+    with pytest.raises(ValueError, match="affects must be a list"):
+        MORPHRuntime.from_dict(
+            {
+                "capabilities": {"enforce": {"affects": "session.status"}},
+                "policies": [{"name": "p", "when": "true", "result": {"status": "deny", "action": "x"}}],
+            }
+        )
 
 
 def test_morph_ir_can_classify_semantic_equivalence_and_emit_a_proposal():
