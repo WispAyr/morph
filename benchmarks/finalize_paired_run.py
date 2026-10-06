@@ -142,6 +142,8 @@ def main() -> int:
         pair_root = args.pair.resolve().parent
         if output_path == pair_root or pair_root in output_path.parents:
             raise ValueError("scorer output must be outside the pair directory and agent workspaces")
+        if output_path == REPO_ROOT or REPO_ROOT in output_path.parents:
+            raise ValueError("scorer output must be outside the source repository")
         output_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         with tempfile.NamedTemporaryFile(
             mode="w", encoding="utf-8", dir=output_path.parent,
