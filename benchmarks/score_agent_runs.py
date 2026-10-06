@@ -19,13 +19,15 @@ METRICS = (
     "relationship_correct",
     "implementation_complete",
     "within_boundary",
-    "definition_valid",
+    "structural_passed",
     "tests_passed",
+    "semantic_relationship_correct",
+    "simulation_passed",
     "task_cases_passed",
 )
-# Gates that are null when they do not apply, such as simulation for a task with no invariants.
-OPTIONAL_METRICS = ("simulation_passed",)
-EVALUATION_BOOLEANS = ("implementation_complete", "within_boundary", "definition_valid", "tests_passed", "task_cases_passed")
+EVALUATION_BOOLEANS = (
+    "implementation_complete", "within_boundary", "structural_passed", "tests_passed", "simulation_passed", "task_cases_passed",
+)
 
 
 def _validate_run(run: Any, index: int) -> None:
@@ -89,8 +91,8 @@ def score_runs(runs: list[dict[str, Any]], reference: dict[str, Any], evaluation
         for field in EVALUATION_BOOLEANS:
             if not isinstance(evaluation.get(field), bool):
                 raise ValueError(f"evaluations[{index}].{field} must be Boolean")
-        if evaluation.get("simulation_passed") is not None and not isinstance(evaluation["simulation_passed"], bool):
-            raise ValueError(f"evaluations[{index}].simulation_passed must be Boolean or null")
+        if evaluation.get("semantic_relationship") not in RELATIONSHIPS:
+            raise ValueError(f"evaluations[{index}].semantic_relationship is invalid")
         if evaluation.get("invariants_status") not in INVARIANT_STATUSES:
             raise ValueError(f"evaluations[{index}].invariants_status is invalid")
         evaluation_by_key[key] = evaluation
@@ -127,7 +129,7 @@ def score_runs(runs: list[dict[str, Any]], reference: dict[str, Any], evaluation
             "relationship_correct": analysis["relationship"] == expected_relationship,
             "unknown_overclaim": expected_relationship == "unknown" and analysis["relationship"] != "unknown",
             **{field: evaluation[field] for field in EVALUATION_BOOLEANS},
-            "simulation_passed": evaluation.get("simulation_passed"),
+            "semantic_relationship_correct": evaluation["semantic_relationship"] == expected_relationship,
             "invariants_status": evaluation["invariants_status"],
             "human_interventions": run["human_interventions"],
             "elapsed_seconds": run["elapsed_seconds"],
@@ -154,9 +156,6 @@ def score_runs(runs: list[dict[str, Any]], reference: dict[str, Any], evaluation
         aggregates[arm] = {"runs": len(arm_results)}
         for metric in METRICS:
             aggregates[arm][metric + "_rate"] = fmean(float(result[metric]) for result in arm_results) if arm_results else 0.0
-        for metric in OPTIONAL_METRICS:
-            applicable = [float(result[metric]) for result in arm_results if result[metric] is not None]
-            aggregates[arm][metric + "_rate"] = fmean(applicable) if applicable else None
         applicable_invariants = [result for result in arm_results if result["invariants_status"] != "not_applicable"]
         aggregates[arm]["invariant_pass_rate"] = (
             fmean(float(result["invariants_status"] == "pass") for result in applicable_invariants)
@@ -168,10 +167,7 @@ def score_runs(runs: list[dict[str, Any]], reference: dict[str, Any], evaluation
         aggregates[arm]["mean_human_interventions"] = fmean(result["human_interventions"] for result in arm_results) if arm_results else 0.0
         aggregates[arm]["mean_elapsed_seconds"] = fmean(result["elapsed_seconds"] for result in arm_results) if arm_results else 0.0
 
-    def arm_result(pair_id: str, arm: str) -> dict[str, Any]:
-        return next(result for result in evaluated if result["pair_id"] == pair_id and result["arm"] == arm)
-
-    paired_deltas: dict[str, float | None] = {
+    paired_deltas = {
         metric: fmean(
             next(result for result in evaluated if result["pair_id"] == pair_id and result["arm"] == "morph_mediated")[metric]
             - next(result for result in evaluated if result["pair_id"] == pair_id and result["arm"] == "direct_source")[metric]
@@ -181,13 +177,6 @@ def score_runs(runs: list[dict[str, Any]], reference: dict[str, Any], evaluation
         else 0.0
         for metric in METRICS
     }
-    for metric in OPTIONAL_METRICS:
-        deltas = [
-            float(arm_result(pair_id, "morph_mediated")[metric]) - float(arm_result(pair_id, "direct_source")[metric])
-            for pair_id in pair_arms
-            if arm_result(pair_id, "morph_mediated")[metric] is not None and arm_result(pair_id, "direct_source")[metric] is not None
-        ]
-        paired_deltas[metric] = fmean(deltas) if deltas else None
     return {"runs": evaluated, "by_arm": aggregates, "mean_paired_deltas_morph_minus_direct": paired_deltas}
 
 

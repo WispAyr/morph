@@ -14,7 +14,7 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from evaluate_candidate import evaluate_arm  # noqa: E402
+from evaluate_candidate import contained_workspace, evaluate_arm, evaluator_task, simulation_passed  # noqa: E402
 
 ARMS = ("direct_source", "morph_mediated")
 
@@ -23,8 +23,18 @@ def _read_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _validate_workspace(pair_path: Path, arm: str, workspace_path: str) -> Path:
+    """The arm's workspace must be the runner-created ``<pair>/<arm>/source``."""
+    return contained_workspace(pair_path.resolve().parent, arm, workspace_path)
+
+
+def _simulation_passed(model: Any, scenarios: list[dict[str, Any]]) -> bool:
+    return simulation_passed(model, scenarios)[0]
+
+
 def finalize_pair(
     pair_path: Path,
+    evaluator_config_path: Path,
     reference_path: Path,
     *,
     allow_development_fixtures: bool = False,
@@ -35,12 +45,18 @@ def finalize_pair(
     kept in their own records keyed by pair and arm. Every gate is computed here by the
     evaluator; nothing the agent or adapter reports is taken as a gate result.
     """
+    pair_dir = pair_path.resolve().parent
+    for private_path in (evaluator_config_path.resolve(), reference_path.resolve()):
+        if private_path == REPO_ROOT or REPO_ROOT in private_path.parents:
+            raise ValueError("evaluator configuration and reference must be outside the source repository")
+        if private_path == pair_dir or pair_dir in private_path.parents:
+            raise ValueError("evaluator configuration and reference must be outside agent workspaces")
     pair = _read_json(pair_path)
+    evaluator_config = _read_json(evaluator_config_path)
     if not isinstance(pair, dict) or not isinstance(pair.get("runs"), dict):
         raise ValueError("pair artifact must contain a runs object")
     if set(pair["runs"]) != set(ARMS):
         raise ValueError("pair artifact must contain both paired arms")
-    pair_dir = pair_path.resolve().parent
     task_id = pair.get("task_id")
     pair_id = pair.get("pair_id")
     if not isinstance(task_id, str) or not isinstance(pair_id, str):
@@ -52,6 +68,7 @@ def finalize_pair(
     task_entry = next((item for item in corpus["tasks"] if item.get("task_id") == task_id), None)
     if task_entry is None:
         raise ValueError(f"unknown task '{task_id}'")
+    task_config = evaluator_task(evaluator_config, task_id)
     if pair.get("evaluation_status") != task_entry.get("evaluation_status"):
         raise ValueError("pair evaluation_status does not match the current corpus")
     if pair.get("prompt_sha256") != hashlib.sha256((REPO_ROOT / task_entry["prompt"]).read_bytes()).hexdigest():
@@ -77,8 +94,11 @@ def finalize_pair(
             raise ValueError(f"{arm} baseline commit does not match the corpus")
         if task_entry.get("evaluation_status") != "frozen" and not allow_development_fixtures:
             raise ValueError(f"task '{task_id}' is a development fixture")
+        if not isinstance(run.get("implementation_complete"), bool):
+            raise ValueError(f"{arm}.implementation_complete must be a Boolean")
         evaluation = evaluate_arm(
             task_entry, pair_dir, arm, run, reference_path,
+            task_config, evaluator_config_path.resolve().parent,
             allow_development_fixtures=allow_development_fixtures,
         )
         agent = run.get("agent")
@@ -122,26 +142,34 @@ def _write_jsonl(path: Path, records: list[dict[str, Any]]) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("pair", type=Path, help="Completed pair.json from run_paired_task.py")
+    parser.add_argument("--evaluator-config", type=Path, required=True, help="Private evaluator manifest with hidden tests and scenarios")
     parser.add_argument("--reference", type=Path, required=True, help="Private evaluator reference JSON")
     parser.add_argument("--output", type=Path, required=True, help="Run records JSONL path outside agent-visible workspaces")
     parser.add_argument("--evaluations-output", type=Path, required=True, help="Independent evaluation JSONL path outside agent-visible workspaces")
     parser.add_argument("--allow-development-fixtures", action="store_true", help="Finalize local development fixtures; not benchmark evidence")
     args = parser.parse_args()
     try:
-        records, evaluations = finalize_pair(
-            args.pair, args.reference,
-            allow_development_fixtures=args.allow_development_fixtures,
-        )
         output_path = args.output.resolve()
         evaluations_path = args.evaluations_output.resolve()
+        evaluator_config_path = args.evaluator_config.resolve()
+        reference_path = args.reference.resolve()
         if output_path == evaluations_path:
             raise ValueError("run records and evaluations must be written to different files")
         pair_root = args.pair.resolve().parent
+        private_roots = {evaluator_config_path.parent, reference_path.parent}
         for path in (output_path, evaluations_path):
             if path == pair_root or pair_root in path.parents:
                 raise ValueError("scorer output must be outside the pair directory and agent workspaces")
             if path == REPO_ROOT or REPO_ROOT in path.parents:
                 raise ValueError("scorer output must be outside the source repository")
+            if any(path == root or root in path.parents for root in private_roots):
+                raise ValueError("scorer output must be outside private evaluator storage")
+            if path in {evaluator_config_path, reference_path}:
+                raise ValueError("scorer output cannot overwrite evaluator inputs")
+        records, evaluations = finalize_pair(
+            args.pair, evaluator_config_path, reference_path,
+            allow_development_fixtures=args.allow_development_fixtures,
+        )
         _write_jsonl(output_path, records)
         _write_jsonl(evaluations_path, evaluations)
         evaluations_path.chmod(0o400)
