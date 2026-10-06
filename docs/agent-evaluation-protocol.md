@@ -37,24 +37,28 @@ Every run record holds only what the agent produced and how the run went:
 }
 ```
 
-Gate outcomes belong to the evaluator, not the agent, so they live in a separate evaluation record keyed by `pair_id` and `arm`:
+Gate outcomes belong to the evaluator, not the agent, so they live in a separate evaluation record keyed by `pair_id` and `arm`. `benchmarks/evaluate_candidate.py` produces it; the main fields are:
 
 ```json
 {
   "task_id": "...",
   "pair_id": "...",
   "arm": "direct_source|morph_mediated",
-  "implementation_complete": false,
-  "structural_passed": false,
-  "tests_passed": false,
-  "semantic_relationship": "unknown",
-  "simulation_passed": false,
-  "task_cases_passed": false,
-  "invariants_status": "not_applicable"
+  "within_boundary": true,
+  "structural_passed": true,
+  "tests_passed": true,
+  "task_cases_passed": true,
+  "simulation_passed": true,
+  "invariants_status": "not_applicable",
+  "semantic_relationship": "narrower",
+  "implementation_complete": true,
+  "agent_claimed_complete": true
 }
 ```
 
-The scorer rejects a run record that carries `judge` or `evaluation` fields, requires exactly one evaluation for every run and no evaluation without a run, and requires one `direct_source` and one `morph_mediated` run per `pair_id`. Score a run file with:
+The record also lists the evaluated files with their hashes, every changed file, files changed outside the boundary, regressions, acceptance-test failures, simulation failures, and per-invariant outcomes, so a reviewer can see why each gate passed or failed.
+
+`simulation_passed` is `null` when the candidate declares no invariants or the reference has no scenarios; the scorer reports its rate over the runs where it applies. The scorer rejects a run record that carries `judge` or `evaluation` fields, requires exactly one evaluation for every run and no evaluation without a run, and requires one `direct_source` and one `morph_mediated` run per `pair_id`. Score a run file with:
 
 ```bash
 python benchmarks/score_agent_runs.py runs.jsonl \
@@ -93,7 +97,11 @@ This judge checks MORPH policy decisions and state transitions. It does not repl
 
 The runner freezes this artifact before sending a `resume` request with the same session token and full source snapshot. The adapter returns an `implementation` object and may include a textual `patch`; the runner also captures the actual workspace diff. Both arms receive snapshots at the corpus-pinned commit with one local baseline commit and no remote history. The MORPH pre-implementation workspace contains only the prompt and definition. The pair order is randomized and recorded.
 
-The implementation response must include a Boolean `implementation_complete`; it may include a non-negative `human_interventions` count. Keep provider/model/version metadata identical across both arms. The runner saves raw phase artifacts and diffs in `pair.json`. The evaluator owns a private manifest beside its hidden tests and scenarios:
+The implementation response must include a Boolean `implementation_complete`; it may include a non-negative `human_interventions` count. That claim is recorded as `agent_claimed_complete` and is never a gate. Keep provider/model/version metadata identical across both arms. The runner saves raw phase artifacts and diffs in `pair.json`.
+
+## Independent Evaluation
+
+After both arms finish, the finalizer evaluates each arm with `benchmarks/evaluate_candidate.py`. No gate result is supplied from outside: the evaluator computes every gate from trusted inputs. Those are the source repository, the corpus, the private reference labels, and a private manifest kept beside the hidden tests:
 
 ```json
 {
@@ -109,7 +117,22 @@ The implementation response must include a Boolean `implementation_complete`; it
 }
 ```
 
-Test paths are relative to the manifest and resolved only within that private directory. Each simulation scenario declares its context and expected `allow` or `deny` decision. The finalizer runs tests with the candidate workspace on `PYTHONPATH`; it derives structural validity, semantic relationship, simulation outcomes, invariant preservation, and task-case outcomes directly. It no longer accepts caller-supplied gate Booleans.
+Test paths are relative to the manifest and resolved only within that private directory. Each simulation scenario declares its context and expected `allow` or `deny` decision. The manifest and reference must be outside the source repository and the pair directory.
+
+- **Workspace containment.** An arm's workspace must be exactly `<pair>/<arm>/source`, the path the runner created, and neither it nor its arm directory may be a symbolic link. A workspace recorded anywhere else is rejected, as is any symbolic link or special file inside it.
+- **Trusted evaluation tree.** The evaluator exports the pinned baseline commit from the source repository, without evaluator-only files, into a private temporary directory, and copies over it only the workspace files inside the task's implementation boundary. The agent's Git history, its edits outside the boundary, and its own reports are never inputs to a gate. Hidden tests run in this tree, with `MORPH_CANDIDATE_WORKSPACE` pointing at it.
+- **`within_boundary`**: no file outside the implementation boundary differs from the baseline. Changed files outside it are listed and make the run incomplete.
+- **`structural_passed`**: the candidate MORPH definition loads, validates, and builds a runtime.
+- **`tests_passed`**: every baseline test that passes on the baseline also passes on the candidate, and every hidden test in the manifest passes. Baseline test files inside the boundary are left out, because the agent may change them; the agent's own tests run separately and are reported as `agent_tests_passed`, which is not a gate.
+- **`task_cases_passed`**: the evaluator-only definition cases.
+- **`simulation_passed`**: every manifest scenario reaches its expected decision and the candidate's invariants hold in it.
+- **`invariants_status`**: `pass` when every baseline invariant is unchanged or proven equivalent, `fail` when one is removed or proven different, `unknown` when a rewrite cannot be proven, and `not_applicable` when the baseline has none. Names listed in `approved_invariant_changes` may change.
+- **`semantic_relationship`**: the classifier's relationship between baseline and candidate; the scorer compares it with the reference label.
+- **`implementation_complete`**: every gate above passed.
+
+Test outcomes are read per test from a JUnit report the evaluator writes, never from pytest's exit code, and a run that produces no report fails. A process that exits early therefore cannot pass a gate.
+
+**Evaluator execution is trusted infrastructure and must run inside a disposable sandbox.** Running baseline, hidden, and agent tests executes candidate code, which can inspect its environment, arguments, and mounts. MORPH does not enforce operating-system isolation itself: run the evaluator in a disposable container or remote worker with no credentials, no network, and only the pair directory, the source repository, and the private evaluator storage mounted.
 
 Generate the scorer inputs after both arms complete. The finalizer writes the two run records and two independent evaluation records to separate files:
 

@@ -27,6 +27,7 @@ def _evaluation(arm, *, pair_id="pilot-1", tests_passed=True, semantic_relations
         "pair_id": pair_id,
         "arm": arm,
         "implementation_complete": True,
+        "within_boundary": True,
         "structural_passed": True,
         "tests_passed": tests_passed,
         "semantic_relationship": semantic_relationship,
