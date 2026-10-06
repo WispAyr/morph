@@ -33,9 +33,32 @@ These differ from the illustrative `crosspoint.yaml`:
 - **A peer node's destination is forwarded to that node before any local check.** The owner decides.
 - **Latency plays no part** in a manual take.
 
+## The rules engine
+
+`src/morph/examples/crosspointd_rules.yaml` models one tick of the automatic rules engine (`Core.runRules`) for one rule and its destination. It either sends a take or a release, or holds with a status saying why. Commands are allow decisions; a status without a command is a deny whose `reason` is the status kind, and both carry the status level crosspointd shows.
+
+`tools/crosspointd_rules_oracle.mjs` drives crosspointd's own `runRules` over 6,080 combinations of what it reads:
+- **The rule:** enabled, `if-free` or `replace`, release.
+- **The destination:** registered, offline, peer, operator-only, on air, command in flight, and whether it shows nothing, the candidate, or another source.
+- **The candidate:** whether a live matching source exists.
+- **The current route and retries:** whether the source currently shown is live, whether this rule made the current route, and recent failed attempts.
+
+It stubs only `sendCommand`. Lock derivation is covered by the manual oracle, so the derived fields are set directly here. Choosing which matching source is the candidate is not part of the decision. `tests/test_crosspointd_rules_model.py` requires all 6,080 decisions to match, and re-records them when `CROSSPOINT_DIR` is set.
+
+Eight decision invariants state the engine's safety rules:
+- it never touches an on-air destination;
+- it never targets a peer or operator-only destination;
+- it only commands registered, online destinations;
+- disabled rules do nothing;
+- it sends one command at a time;
+- an `if-free` rule never displaces a live source it did not put there;
+- it releases only its own route;
+- a failed command waits before retrying.
+
+Removing the policy behind any of them breaks it in simulation. Reordering the on-air and in-flight checks breaks no invariant, but disagrees with crosspointd in 160 scenarios.
+
 ## Not yet covered
 
-- The automatic rules engine (`Core.runRules`), which never touches an on-air, operator-only, offline, or peer destination and has its own if-free and release policies.
 - Proposal resolution: taken, declined, expired, cancelled, superseded, withdrawn.
 - Federation on the owner's side, where a forwarded request is decided.
 
