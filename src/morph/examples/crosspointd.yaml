@@ -1,0 +1,123 @@
+name: crosspointd
+version: 0.1.0
+description: >-
+  Manual take and release in the Crosspoint control plane (crosspointd Core.manualTake /
+  manualRelease). Every scenario in tests/fixtures/crosspointd_manual_decisions.jsonl.gz,
+  recorded from crosspointd itself, must reach the same decision here.
+
+entities:
+  - name: request
+    fields: {action: string, force: bool}
+  - name: destination
+    fields:
+      id: string
+      kind: string               # sd-slot | ndi | audio | screen | other
+      accepts: list              # source kinds it takes; empty accepts any
+      operator_only: bool        # its own operator decides; Crosspoint only proposes
+      peer: bool                 # imported from a peer node, which owns the route
+      on_program: bool           # the owner reports it on programme
+      program_tally: bool        # a switcher reports it on programme
+      command_in_flight: bool    # a command for it is awaiting an ack
+  - name: source
+    fields:
+      id: string
+      kind: string               # camera | caller | composition | ...
+      peer: bool
+      pull_granted: bool         # the peer granted pull; always true for local sources
+
+capabilities:
+  route_command:
+    description: Send a take or release command to the destination's owner.
+    requires: []
+    inputs: {command: string, destination: string, source: string, force: bool}
+    outputs: {}
+    failures: [owner_disconnected, refused, timeout]
+  propose_to_operator:
+    description: Arm a proposal the destination's operator may take, decline, or let expire.
+    requires: []
+    inputs: {propose: string, destination: string, source: string}
+    outputs: {}
+    failures: [owner_disconnected, not_understood, timeout]
+  forward_to_owner:
+    description: Forward the request to the peer node that owns the destination; it decides.
+    requires: []
+    inputs: {command: string, destination: string, source: string}
+    outputs: {}
+    failures: [federation_down]
+
+actions:
+  take:
+    capability: route_command
+    inputs: {command: '"take"', destination: destination.id, source: source.id, force: "false"}
+  forced_take:
+    capability: route_command
+    inputs: {command: '"take"', destination: destination.id, source: source.id, force: "true"}
+  release:
+    capability: route_command
+    inputs: {command: '"release"', destination: destination.id, source: '""', force: "false"}
+  forced_release:
+    capability: route_command
+    inputs: {command: '"release"', destination: destination.id, source: '""', force: "true"}
+  propose_take:
+    capability: propose_to_operator
+    inputs: {propose: '"take"', destination: destination.id, source: source.id}
+  propose_release:
+    capability: propose_to_operator
+    inputs: {propose: '"release"', destination: destination.id, source: '""'}
+  forward_take:
+    capability: forward_to_owner
+    inputs: {command: '"take"', destination: destination.id, source: source.id}
+  forward_release:
+    capability: forward_to_owner
+    inputs: {command: '"release"', destination: destination.id, source: '""'}
+
+# First match decides, in crosspointd's order. "On air" is crosspointd's lock: the owner
+# reports the destination on programme, or a switcher's tally does.
+policies:
+  # A peer's destination belongs to the peer: forwarded before any local check, never forced from here.
+  - name: forward_take
+    when: request.action == "take" && destination.peer
+    result: {status: allow, action: forward_take}
+  - name: forward_release
+    when: request.action == "release" && destination.peer
+    result: {status: allow, action: forward_release}
+
+  - name: deny_screen_needs_layout
+    when: request.action == "take" && destination.kind == "screen" && source.kind != "composition"
+    result: {status: deny, action: reject_request, reason: screen_needs_layout}
+  - name: deny_not_accepted
+    when: request.action == "take" && size(destination.accepts) > 0 && !(source.kind in destination.accepts)
+    result: {status: deny, action: reject_request, reason: not_accepted}
+  - name: deny_pull_not_granted
+    when: request.action == "take" && source.peer && !source.pull_granted
+    result: {status: deny, action: reject_request, reason: pull_not_granted}
+
+  # Operator-only destinations are never checked for on air: a proposal changes nothing until their operator acts.
+  - name: deny_on_air
+    when: >-
+      !destination.operator_only && (destination.on_program || destination.program_tally) && !request.force
+    result: {status: deny, action: reject_request, reason: on_air}
+  - name: deny_in_flight
+    when: destination.command_in_flight
+    result: {status: deny, action: reject_request, reason: in_flight}
+
+  - name: propose_take
+    when: request.action == "take" && destination.operator_only
+    result: {status: allow, action: propose_take}
+  - name: propose_release
+    when: request.action == "release" && destination.operator_only
+    result: {status: allow, action: propose_release}
+
+  # force is only sent when it overrides something: a forced request on an off-air destination is a plain one.
+  - name: forced_take
+    when: request.action == "take" && (destination.on_program || destination.program_tally)
+    result: {status: allow, action: forced_take}
+  - name: take
+    when: request.action == "take"
+    result: {status: allow, action: take}
+  - name: forced_release
+    when: request.action == "release" && (destination.on_program || destination.program_tally)
+    result: {status: allow, action: forced_release}
+  - name: release
+    when: request.action == "release"
+    result: {status: allow, action: release}
