@@ -51,6 +51,22 @@ def test_transition_conditions_may_read_the_event():
     assert schema.entities["d"].transitions[0].when.source == "event.fields.x == 1"
 
 
+def test_act_on_an_unbound_allow_records_it_without_crashing():
+    definition = {
+        "entities": [{"name": "route", "fields": {"id": "string", "status": "string"}, "states": ["idle", "active"], "transitions": [{"on": "go.succeeded", "to": "active"}]}],
+        "policies": [{"name": "allow", "when": 'route.status == "ready"', "result": {"status": "allow", "action": "go"}}],
+    }
+    sys_ = MORPHSystem(definition, {}, EventStore())
+    sys_.observe("route", "r1", status="ready")
+
+    result = sys_.act(route="r1")
+
+    assert result.status == "unbound"
+    assert result.decision["status"] == "allow"
+    assert sys_.state("route", "r1")["state"] == "idle"
+    assert [event["data"]["status"] for event in sys_.history(kinds=["effect"])] == ["unbound"]
+
+
 def test_policies_can_read_machine_state():
     runtime = MORPHRuntime.from_dict(
         {

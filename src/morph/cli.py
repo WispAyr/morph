@@ -83,7 +83,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     impact_parser = subparsers.add_parser("impact", help="Explain what a semantic subject depends on and what it affects.")
     impact_parser.add_argument("source", help="Path to the MORPH YAML file to inspect.")
-    impact_parser.add_argument("subject", help="Semantic subject or field path, for example ParkingSession.status.")
+    impact_parser.add_argument("subject", help="An entity, field path, capability, or action, for example source.latency_ms.")
     impact_parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output.")
 
     plan_parser = subparsers.add_parser("plan", aliases=["review"], help="Review a proposed semantic mutation and report whether it is safe to accept.")

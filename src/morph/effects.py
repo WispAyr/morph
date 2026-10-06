@@ -42,7 +42,7 @@ from .validators import CapabilityValidator
 
 Adapter = Callable[[dict[str, Any]], Any]
 
-CAPABILITY_KEYS = {"description", "requires", "inputs", "outputs", "failures", "idempotency", "retries"}
+CAPABILITY_KEYS = {"description", "requires", "inputs", "outputs", "failures", "idempotency", "retries", "affects"}
 ACTION_KEYS = {"description", "capability", "inputs"}
 
 
@@ -85,6 +85,8 @@ class CapabilitySpec:
     retries: int = 0
     requires: list[str] | None = None
     description: str = ""
+    # Subjects the effect changes in the world. Read by impact analysis, not enforced.
+    affects: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, name: str, data: Any) -> "CapabilitySpec":
@@ -134,6 +136,11 @@ class CapabilitySpec:
             errors.append(f"capability '{name}'.retries must be a non-negative integer")
             retries = 0
 
+        affects = data.get("affects") or []
+        if not isinstance(affects, list) or not all(isinstance(item, str) and item for item in affects):
+            errors.append(f"capability '{name}'.affects must be a list of non-empty subjects")
+            affects = []
+
         if errors:
             raise ValueError("; ".join(errors))
 
@@ -146,6 +153,7 @@ class CapabilitySpec:
             retries=retries,
             requires=list(requires) if requires is not None else None,
             description=str(data.get("description", "")),
+            affects=list(affects),
         )
 
     def grant_definition(self) -> dict[str, Any] | None:
@@ -176,6 +184,8 @@ class CapabilitySpec:
             data["requires"] = list(self.requires)
         if self.description:
             data["description"] = self.description
+        if self.affects:
+            data["affects"] = list(self.affects)
         return data
 
 
