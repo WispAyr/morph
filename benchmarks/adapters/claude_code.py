@@ -64,10 +64,12 @@ ANALYSIS_SCHEMA = {
                     "type": "array",
                     "items": {"type": "string", "pattern": SUBJECT_PATTERN},
                     "description": (
-                        "Every existing part of the definition whose meaning or effect changes, as kind:name using the "
-                        "definition's own names exactly: policy:<name>, invariant:<name>, action:<name>, "
-                        "capability:<name>, entity:<name>, field:<entity>.<field>, or transition:<entity>.<event>. "
-                        "Name a new field the task introduces as field:<entity>.<field>. Do not list parts you would add."
+                        "The existing parts of the definition the change affects, as kind:name using the definition's "
+                        "own names exactly. List: every policy that will decide some request differently "
+                        "(policy:<name>), every invariant that must change or be removed (invariant:<name>), every "
+                        "action, capability, or transition whose definition must change, and every field the task adds "
+                        "(field:<entity>.<field>). Do not list fields a change only reads, parts you would add, or "
+                        "parts whose definition and decisions stay the same."
                     ),
                 },
                 "relationship": {

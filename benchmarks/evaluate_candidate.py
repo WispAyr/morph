@@ -355,7 +355,11 @@ def evaluate_arm(
         hidden_failures = sorted(node for node, outcome in hidden_outcomes.items() if outcome != "passed")
         if not hidden_outcomes:
             hidden_failures = ["<no hidden tests ran>"]
-        agent_test_files = sorted(path for path in boundary if path.startswith("tests/") and (candidate_tree / path).is_file())
+        agent_test_files = sorted(
+            path for path in boundary
+            if path.startswith("tests/") and PurePosixPath(path).name.startswith("test_") and path.endswith(".py")
+            and (candidate_tree / path).is_file()
+        )
         agent_outcomes = _run_tests(candidate_tree, agent_test_files, scratch_path / "agent.xml", timeout)
 
         if candidate is None:

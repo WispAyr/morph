@@ -83,7 +83,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     impact_parser = subparsers.add_parser("impact", help="Explain what a semantic subject depends on and what it affects.")
     impact_parser.add_argument("source", help="Path to the MORPH YAML file to inspect.")
-    impact_parser.add_argument("subject", help="An entity, field path, capability, or action, for example source.latency_ms.")
+    impact_parser.add_argument("subject", help="An entity, field path, capability, action, policy, or invariant, bare or as kind:name, for example source.latency_ms or policy:deny_on_air.")
     impact_parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output.")
 
     plan_parser = subparsers.add_parser("plan", aliases=["review"], help="Review a proposed semantic mutation and report whether it is safe to accept.")
@@ -381,6 +381,9 @@ def _cmd_impact(source: str, subject: str, pretty: bool) -> int:
         report = definition.impact(subject)
         print(json.dumps(report, indent=2 if pretty else None))
         return 0
+    except KeyError as exc:
+        print(f"error: {exc.args[0]}")
+        return 1
     except (OSError, ValueError, TypeError, yaml.YAMLError) as exc:
         print(f"error: {exc}")
         return 1
