@@ -276,3 +276,17 @@ def test_classify_equivalence_combines_policy_and_invariant_changes():
     assert baseline.classify_equivalence(broader_policy) == "BROADER"
     assert baseline.classify_equivalence(mixed) == "UNKNOWN"
 
+
+def test_score_runs_rejects_evaluations_without_a_run():
+    runs = [_run("direct_source", affected=[]), _run("morph_mediated", affected=[])]
+    evaluations = [_evaluation("direct_source"), _evaluation("morph_mediated"), _evaluation("morph_mediated", pair_id="other")]
+    with pytest.raises(ValueError, match="do not match any run"):
+        score_runs(runs, {"tasks": {"pilot": {"affected_subjects": [], "relationship": "broader"}}}, evaluations)
+
+
+def test_score_runs_rejects_an_evaluation_for_a_different_task():
+    runs = [_run("direct_source", affected=[]), _run("morph_mediated", affected=[])]
+    evaluations = [_evaluation("direct_source"), {**_evaluation("morph_mediated"), "task_id": "other"}]
+    with pytest.raises(ValueError, match="different task"):
+        score_runs(runs, {"tasks": {"pilot": {"affected_subjects": [], "relationship": "broader"}}}, evaluations)
+

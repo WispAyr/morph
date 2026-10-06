@@ -106,9 +106,11 @@ def score_runs(runs: list[dict[str, Any]], reference: dict[str, Any], evaluation
         if expected_relationship not in RELATIONSHIPS:
             raise ValueError(f"reference task '{task_id}' has an invalid relationship")
         analysis = run["analysis"]
-        evaluation = evaluation_by_key.get((run["pair_id"], run["arm"]))
+        evaluation = evaluation_by_key.pop((run["pair_id"], run["arm"]), None)
         if evaluation is None:
             raise ValueError(f"missing independent evaluation for pair '{run['pair_id']}' arm '{run['arm']}'")
+        if evaluation.get("task_id", task_id) != task_id:
+            raise ValueError(f"evaluation for pair '{run['pair_id']}' arm '{run['arm']}' is for a different task")
         result = {
             "task_id": task_id,
             "pair_id": run["pair_id"],
@@ -127,6 +129,9 @@ def score_runs(runs: list[dict[str, Any]], reference: dict[str, Any], evaluation
             "elapsed_seconds": run["elapsed_seconds"],
         }
         evaluated.append(result)
+    if evaluation_by_key:
+        orphans = sorted(f"{pair_id} / {arm}" for pair_id, arm in evaluation_by_key)
+        raise ValueError(f"evaluations do not match any run: {orphans}")
 
     for pair_id, arm_runs in pair_arms.items():
         if set(arm_runs) != ARMS:

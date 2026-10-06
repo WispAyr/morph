@@ -19,7 +19,7 @@ The MORPH-mediated workflow should use the available semantic operations: inspec
 
 ## Required Artifacts
 
-Every run records:
+Every run record holds only what the agent produced and how the run went:
 
 ```json
 {
@@ -32,29 +32,38 @@ Every run records:
   "morph_analysis": {},
   "analysis": {"affected_subjects": [], "relationship": "unknown"},
   "patch": "...",
-  "judge": {
-    "implementation_complete": false,
-    "tests_passed": false,
-    "simulation_passed": false,
-    "task_cases_passed": false,
-    "invariants_status": "not_applicable"
-  },
   "human_interventions": 0,
   "elapsed_seconds": 0
 }
 ```
 
-The scorer requires one `direct_source` and one `morph_mediated` record per `pair_id`. Score a run file with:
+Gate outcomes belong to the evaluator, not the agent, so they live in a separate evaluation record keyed by `pair_id` and `arm`:
+
+```json
+{
+  "task_id": "...",
+  "pair_id": "...",
+  "arm": "direct_source|morph_mediated",
+  "implementation_complete": false,
+  "tests_passed": false,
+  "simulation_passed": false,
+  "task_cases_passed": false,
+  "invariants_status": "not_applicable"
+}
+```
+
+The scorer rejects a run record that carries `judge` or `evaluation` fields, requires exactly one evaluation for every run and no evaluation without a run, and requires one `direct_source` and one `morph_mediated` run per `pair_id`. Score a run file with:
 
 ```bash
 python benchmarks/score_agent_runs.py runs.jsonl \
+  --evaluations evaluations.jsonl \
   --reference /secure/evaluator/reference.json \
   --corpus benchmarks/agent-study/corpus.json --pretty
 ```
 
 The corpus index is required. It pins each task to a baseline commit, prompt, definition, and expected implementation boundary. The scorer checks that the index and evaluator reference agree and that the run file covers every indexed task. Development fixtures require `--allow-development-fixtures` and their results are not benchmark evidence.
 
-The deterministic definition-case judge is `benchmarks/judge_candidate.py`. The evaluator runs it against each candidate definition and records its `task_cases_passed` result in the run artifact. It replays the pinned baseline first as a reference sanity check. For example:
+The deterministic definition-case judge is `benchmarks/judge_candidate.py`. The evaluator runs it against each candidate definition and records its `task_cases_passed` result in the evaluation record. It replays the pinned baseline first as a reference sanity check. For example:
 
 ```bash
 python benchmarks/judge_candidate.py crosspoint-route-success-from-idle candidate.yaml \
@@ -91,16 +100,17 @@ The implementation response must include a Boolean `implementation_complete`; it
 }
 ```
 
-Then generate the two scorer records with the deterministic task-case judge:
+Then generate the scorer inputs with the deterministic task-case judge. The finalizer writes the two run records and the two evaluation records to separate files:
 
 ```bash
 python benchmarks/finalize_paired_run.py /private/morph-runs/pair-001/pair.json \
   --gates /private/morph-evaluator/pair-001/gates.json \
   --reference /secure/evaluator/reference.json \
-  --output /private/morph-results/pair-001.runs.jsonl
+  --output /private/morph-results/pair-001.runs.jsonl \
+  --evaluations-output /private/morph-results/pair-001.evaluations.jsonl
 ```
 
-Append each pair's JSONL records to a private corpus-wide run file before scoring. Keep gate inputs and finalized results outside both the agent workspaces and source checkout. The finalizer enforces that output boundary, runs only after both arms have completed, and verifies frozen prediction hashes, prompt hash, task status, and pinned baseline before reading the evaluator reference. Its definition-case judge replays the pinned baseline as a sanity check. A failed baseline sanity check is an evaluation setup failure and must be resolved before interpreting candidate results.
+Append each pair's run and evaluation records to private corpus-wide run and evaluation files before scoring. Keep gate inputs and finalized results outside both the agent workspaces and source checkout. The finalizer enforces that output boundary, runs only after both arms have completed, and verifies frozen prediction hashes, prompt hash, task status, and pinned baseline before reading the evaluator reference. Its definition-case judge replays the pinned baseline as a sanity check. A failed baseline sanity check is an evaluation setup failure and must be resolved before interpreting candidate results.
 
 Example invocation:
 

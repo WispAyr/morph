@@ -30,7 +30,12 @@ def finalize_pair(
     reference_path: Path,
     *,
     allow_development_fixtures: bool = False,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Return the agent run records and the independent evaluation records for one pair.
+
+    The scorer rejects run records that carry evaluator-owned fields, so gate outcomes are
+    kept in their own records keyed by pair and arm.
+    """
     pair = _read_json(pair_path)
     gates = _read_json(gates_path)
     if not isinstance(pair, dict) or not isinstance(pair.get("runs"), dict):
@@ -57,6 +62,7 @@ def finalize_pair(
     if pair.get("arm_order") not in (list(ARMS), list(reversed(ARMS))):
         raise ValueError("pair arm_order must contain both arms exactly once")
     records = []
+    evaluations = []
     for arm in ARMS:
         run = pair["runs"][arm]
         gate = gates[arm]
@@ -112,17 +118,32 @@ def finalize_pair(
             "morph_analysis": frozen["morph_analysis"],
             "analysis": analysis,
             "patch": run.get("patch", ""),
-            "judge": {
-                "implementation_complete": run.get("implementation_complete"),
-                "tests_passed": gate["tests_passed"],
-                "simulation_passed": gate["simulation_passed"],
-                "task_cases_passed": judged["task_cases_passed"],
-                "invariants_status": invariants,
-            },
             "human_interventions": interventions,
             "elapsed_seconds": elapsed,
         })
-    return records
+        evaluations.append({
+            "task_id": task_id,
+            "pair_id": pair_id,
+            "arm": arm,
+            "implementation_complete": run.get("implementation_complete"),
+            "tests_passed": gate["tests_passed"],
+            "simulation_passed": gate["simulation_passed"],
+            "task_cases_passed": judged["task_cases_passed"],
+            "invariants_status": invariants,
+        })
+    return records, evaluations
+
+
+def _write_jsonl(path: Path, records: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=path.parent,
+        prefix=f".{path.name}.", delete=False,
+    ) as output:
+        for record in records:
+            output.write(json.dumps(record, sort_keys=True) + "\n")
+        temporary_path = Path(output.name)
+    os.replace(temporary_path, path)
 
 
 def main() -> int:
@@ -130,32 +151,35 @@ def main() -> int:
     parser.add_argument("pair", type=Path, help="Completed pair.json from run_paired_task.py")
     parser.add_argument("--gates", type=Path, required=True, help="Evaluator JSON with test, simulation, and invariant outcomes")
     parser.add_argument("--reference", type=Path, required=True, help="Private evaluator reference JSON")
-    parser.add_argument("--output", type=Path, required=True, help="Output JSONL path outside agent-visible workspaces")
+    parser.add_argument("--output", type=Path, required=True, help="Run records JSONL path outside agent-visible workspaces")
+    parser.add_argument("--evaluations-output", type=Path, required=True, help="Independent evaluation JSONL path outside agent-visible workspaces")
     parser.add_argument("--allow-development-fixtures", action="store_true", help="Finalize local development fixtures; not benchmark evidence")
     args = parser.parse_args()
     try:
-        records = finalize_pair(
+        records, evaluations = finalize_pair(
             args.pair, args.gates, args.reference,
             allow_development_fixtures=args.allow_development_fixtures,
         )
         output_path = args.output.resolve()
+        evaluations_path = args.evaluations_output.resolve()
+        if output_path == evaluations_path:
+            raise ValueError("run records and evaluations must be written to different files")
         pair_root = args.pair.resolve().parent
-        if output_path == pair_root or pair_root in output_path.parents:
-            raise ValueError("scorer output must be outside the pair directory and agent workspaces")
-        if output_path == REPO_ROOT or REPO_ROOT in output_path.parents:
-            raise ValueError("scorer output must be outside the source repository")
-        output_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        with tempfile.NamedTemporaryFile(
-            mode="w", encoding="utf-8", dir=output_path.parent,
-            prefix=f".{output_path.name}.", delete=False,
-        ) as output:
-            for record in records:
-                output.write(json.dumps(record, sort_keys=True) + "\n")
-            temporary_path = Path(output.name)
-        os.replace(temporary_path, output_path)
+        for path in (output_path, evaluations_path):
+            if path == pair_root or pair_root in path.parents:
+                raise ValueError("scorer output must be outside the pair directory and agent workspaces")
+            if path == REPO_ROOT or REPO_ROOT in path.parents:
+                raise ValueError("scorer output must be outside the source repository")
+        _write_jsonl(output_path, records)
+        _write_jsonl(evaluations_path, evaluations)
     except (OSError, ValueError, TypeError, KeyError) as exc:
         parser.error(str(exc))
-    print(json.dumps({"records_written": len(records), "output": str(output_path)}, indent=2))
+    print(json.dumps({
+        "records_written": len(records),
+        "output": str(output_path),
+        "evaluations_written": len(evaluations),
+        "evaluations_output": str(evaluations_path),
+    }, indent=2))
     return 0
 
 
