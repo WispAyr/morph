@@ -46,14 +46,8 @@ def _validate_run(run: Any, index: int) -> None:
     if analysis.get("relationship") not in RELATIONSHIPS:
         raise ValueError(f"{label}.analysis.relationship must be one of {sorted(RELATIONSHIPS)}")
 
-    judge = run.get("judge")
-    if not isinstance(judge, dict):
-        raise ValueError(f"{label}.judge must be an object")
-    for key in ("implementation_complete", "tests_passed", "simulation_passed", "task_cases_passed"):
-        if not isinstance(judge.get(key), bool):
-            raise ValueError(f"{label}.judge.{key} must be a Boolean")
-    if judge.get("invariants_status") not in INVARIANT_STATUSES:
-        raise ValueError(f"{label}.judge.invariants_status must be one of {sorted(INVARIANT_STATUSES)}")
+    if "judge" in run or "evaluation" in run:
+        raise ValueError(f"{label} must not contain evaluator-owned fields")
 
     if not isinstance(run.get("human_interventions"), int) or run["human_interventions"] < 0:
         raise ValueError(f"{label}.human_interventions must be a non-negative integer")
@@ -70,7 +64,7 @@ def _impact_scores(predicted: set[str], expected: set[str]) -> tuple[float, floa
     return precision, recall, f1
 
 
-def score_runs(runs: list[dict[str, Any]], reference: dict[str, Any]) -> dict[str, Any]:
+def score_runs(runs: list[dict[str, Any]], reference: dict[str, Any], evaluations: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     if not isinstance(reference, dict):
         raise ValueError("reference must be a JSON object")
     tasks = reference.get("tasks")
@@ -79,6 +73,21 @@ def score_runs(runs: list[dict[str, Any]], reference: dict[str, Any]) -> dict[st
 
     evaluated: list[dict[str, Any]] = []
     pair_arms: dict[str, dict[str, dict[str, Any]]] = {}
+    evaluation_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+    for index, evaluation in enumerate(evaluations or []):
+        if not isinstance(evaluation, dict):
+            raise ValueError(f"evaluations[{index}] must be an object")
+        key = (evaluation.get("pair_id"), evaluation.get("arm"))
+        if not all(isinstance(value, str) and value for value in key):
+            raise ValueError(f"evaluations[{index}] must declare pair_id and arm")
+        if key in evaluation_by_key:
+            raise ValueError(f"duplicate evaluation for {key[0]} / {key[1]}")
+        for field in ("implementation_complete", "tests_passed", "simulation_passed", "task_cases_passed"):
+            if not isinstance(evaluation.get(field), bool):
+                raise ValueError(f"evaluations[{index}].{field} must be Boolean")
+        if evaluation.get("invariants_status") not in INVARIANT_STATUSES:
+            raise ValueError(f"evaluations[{index}].invariants_status is invalid")
+        evaluation_by_key[key] = evaluation
     for index, run in enumerate(runs):
         _validate_run(run, index)
         task_id = run["task_id"]
@@ -97,7 +106,11 @@ def score_runs(runs: list[dict[str, Any]], reference: dict[str, Any]) -> dict[st
         if expected_relationship not in RELATIONSHIPS:
             raise ValueError(f"reference task '{task_id}' has an invalid relationship")
         analysis = run["analysis"]
-        judge = run["judge"]
+        evaluation = evaluation_by_key.pop((run["pair_id"], run["arm"]), None)
+        if evaluation is None:
+            raise ValueError(f"missing independent evaluation for pair '{run['pair_id']}' arm '{run['arm']}'")
+        if evaluation.get("task_id", task_id) != task_id:
+            raise ValueError(f"evaluation for pair '{run['pair_id']}' arm '{run['arm']}' is for a different task")
         result = {
             "task_id": task_id,
             "pair_id": run["pair_id"],
@@ -107,15 +120,18 @@ def score_runs(runs: list[dict[str, Any]], reference: dict[str, Any]) -> dict[st
             "impact_f1": f1,
             "relationship_correct": analysis["relationship"] == expected_relationship,
             "unknown_overclaim": expected_relationship == "unknown" and analysis["relationship"] != "unknown",
-            "implementation_complete": judge["implementation_complete"],
-            "tests_passed": judge["tests_passed"],
-            "simulation_passed": judge["simulation_passed"],
-            "task_cases_passed": judge["task_cases_passed"],
-            "invariants_status": judge["invariants_status"],
+            "implementation_complete": evaluation["implementation_complete"],
+            "tests_passed": evaluation["tests_passed"],
+            "simulation_passed": evaluation["simulation_passed"],
+            "task_cases_passed": evaluation["task_cases_passed"],
+            "invariants_status": evaluation["invariants_status"],
             "human_interventions": run["human_interventions"],
             "elapsed_seconds": run["elapsed_seconds"],
         }
         evaluated.append(result)
+    if evaluation_by_key:
+        orphans = sorted(f"{pair_id} / {arm}" for pair_id, arm in evaluation_by_key)
+        raise ValueError(f"evaluations do not match any run: {orphans}")
 
     for pair_id, arm_runs in pair_arms.items():
         if set(arm_runs) != ARMS:
@@ -239,6 +255,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("runs", type=Path, help="JSON Lines file containing paired agent run records")
     parser.add_argument("--reference", type=Path, required=True, help="JSON reference labels keyed by task_id")
+    parser.add_argument("--evaluations", type=Path, required=True, help="JSON Lines produced by the independent evaluator")
     parser.add_argument("--corpus", type=Path, required=True, help="Versioned task corpus index to validate against")
     parser.add_argument("--allow-development-fixtures", action="store_true", help="Allow explicitly marked fixtures; results are not benchmark evidence")
     parser.add_argument("--pretty", action="store_true")
@@ -256,7 +273,7 @@ def main() -> int:
                 f"corpus contains development fixtures {fixture_tasks}; pass --allow-development-fixtures for local validation only"
             )
         runs = _read_jsonl(args.runs)
-        result = score_runs(runs, reference)
+        result = score_runs(runs, reference, _read_jsonl(args.evaluations))
         covered = {run.get("task_id") for run in runs if isinstance(run, dict)}
         if covered != set(corpus_tasks):
             missing = sorted(set(corpus_tasks) - covered)

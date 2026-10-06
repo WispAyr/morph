@@ -411,12 +411,9 @@ class MORPHIR:
             "invariants": invariants,
         }
 
-    def equivalent_to(self, candidate: "MORPHIR | dict[str, Any]") -> bool:
-        """Return True when two MORPHIR objects carry the same semantic meaning."""
-        if not isinstance(candidate, MORPHIR):
-            candidate = MORPHIR.from_dict(candidate)
-
-        left = {
+    def _semantic_payload(self) -> dict[str, Any]:
+        """Return the model payload used for structural equality comparisons."""
+        return {
             "entities": self.entities,
             "policies": self.policies,
             "capabilities": self.capabilities,
@@ -425,16 +422,19 @@ class MORPHIR:
             "intent": self.intent,
             "invariants": self.invariants,
         }
-        right = {
-            "entities": candidate.entities,
-            "policies": candidate.policies,
-            "capabilities": candidate.capabilities,
-            "actions": candidate.actions,
-            "workflow": candidate.workflow,
-            "intent": candidate.intent,
-            "invariants": candidate.invariants,
-        }
-        return left == right
+
+    def structurally_equal(self, candidate: "MORPHIR | dict[str, Any]") -> bool:
+        """Return True only when the semantic model payloads are structurally identical."""
+        if not isinstance(candidate, MORPHIR):
+            candidate = MORPHIR.from_dict(candidate)
+        return self._semantic_payload() == candidate._semantic_payload()
+
+    def equivalent_to(self, candidate: "MORPHIR | dict[str, Any]") -> bool:
+        """Backward-compatible alias for structural equality.
+
+        Use classify_equivalence() when semantic equivalence is required.
+        """
+        return self.structurally_equal(candidate)
 
     @staticmethod
     def _shared_semantic_types(left: "MORPHIR", right: "MORPHIR") -> dict[str, str]:
@@ -456,28 +456,66 @@ class MORPHIR:
         return " && ".join(f"({condition})" for condition in conditions) if conditions else "true"
 
     def classify_equivalence(self, candidate: "MORPHIR | dict[str, Any]") -> str:
-        """Return a pragmatic semantic equivalence classification.
+        """Return a conservative semantic classification of a candidate model.
 
-        The classification is intentionally conservative and designed for AI review, not a
-        full theorem prover. It distinguishes identical, equivalent, narrower, broader,
-        conflicting, and unknown cases using explicit invariant conditions.
+        Designed for AI review, not as a full theorem prover. Everything other than policy
+        conditions and invariant conditions must be structurally identical, and policies must
+        keep the same names, order, and results, because evaluation is first-match. The
+        invariant conjunction and each rewritten policy condition are then compared with the
+        reasoner. Unchanged parts do not move the result; any unproven comparison, or changes
+        that pull in different directions, give ``UNKNOWN``.
         """
         if not isinstance(candidate, MORPHIR):
             candidate = MORPHIR.from_dict(candidate)
 
-        if self.equivalent_to(candidate):
+        if self.structurally_equal(candidate):
             return "IDENTICAL"
 
-        if not self.invariants and not candidate.invariants:
-            return "IDENTICAL"
-        analysis = SemanticReasoner().analyze(
-            self._invariant_condition(self.invariants),
-            self._invariant_condition(candidate.invariants),
-            types=self._shared_semantic_types(self, candidate),
-        )
-        if analysis["confidence"] != "proven":
+        left = self._semantic_payload()
+        right = candidate._semantic_payload()
+        left_policies = left.pop("policies")
+        right_policies = right.pop("policies")
+        left_invariants = left.pop("invariants")
+        right_invariants = right.pop("invariants")
+        if left != right:
             return "UNKNOWN"
-        return analysis["relationship"].upper()
+        if len(left_policies) != len(right_policies):
+            return "UNKNOWN"
+
+        types = self._shared_semantic_types(self, candidate)
+        comparisons: list[tuple[Any, Any]] = []
+        names: set[Any] = set()
+        for before, after in zip(left_policies, right_policies):
+            if not isinstance(before, dict) or not isinstance(after, dict):
+                if before != after:
+                    return "UNKNOWN"
+                continue
+            if before.get("name") != after.get("name") or before.get("name") in names:
+                return "UNKNOWN"
+            names.add(before.get("name"))
+            if before == after:
+                continue
+            before_rest = {key: value for key, value in before.items() if key != "when"}
+            after_rest = {key: value for key, value in after.items() if key != "when"}
+            if before_rest != after_rest:
+                return "UNKNOWN"
+            comparisons.append((before.get("when"), after.get("when")))
+        if left_invariants != right_invariants:
+            comparisons.append((self._invariant_condition(left_invariants), self._invariant_condition(right_invariants)))
+
+        relationships: set[str] = set()
+        for before_when, after_when in comparisons:
+            analysis = SemanticReasoner().analyze(when_to_cel(before_when), when_to_cel(after_when), types=types)
+            if analysis["confidence"] != "proven":
+                return "UNKNOWN"
+            relationships.add(analysis["relationship"])
+
+        changed = relationships - {"equivalent"}
+        if not changed:
+            return "EQUIVALENT"
+        if len(changed) == 1:
+            return changed.pop().upper()
+        return "UNKNOWN"
 
     def semantic_equivalence(self, candidate: "MORPHIR | dict[str, Any]") -> bool:
         """Alias for equivalent_to()."""

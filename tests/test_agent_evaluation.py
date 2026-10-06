@@ -16,15 +16,20 @@ def _run(arm, *, affected, relationship="broader", tests_passed=True):
         "arm": arm,
         "agent": {"provider": "test", "model": "same-agent", "version": "1"},
         "analysis": {"affected_subjects": affected, "relationship": relationship},
-        "judge": {
-            "implementation_complete": True,
-            "tests_passed": tests_passed,
-            "simulation_passed": True,
-            "task_cases_passed": True,
-            "invariants_status": "not_applicable",
-        },
         "human_interventions": 0,
         "elapsed_seconds": 30,
+    }
+
+
+def _evaluation(arm, *, pair_id="pilot-1", tests_passed=True):
+    return {
+        "pair_id": pair_id,
+        "arm": arm,
+        "implementation_complete": True,
+        "tests_passed": tests_passed,
+        "simulation_passed": True,
+        "task_cases_passed": True,
+        "invariants_status": "not_applicable",
     }
 
 
@@ -35,7 +40,7 @@ def test_score_runs_compares_a_paired_task_by_arm():
         _run("morph_mediated", affected=expected),
     ]
 
-    result = score_runs(runs, {"tasks": {"pilot": {"affected_subjects": expected, "relationship": "broader"}}})
+    result = score_runs(runs, {"tasks": {"pilot": {"affected_subjects": expected, "relationship": "broader"}}}, [_evaluation("direct_source", tests_passed=False), _evaluation("morph_mediated")])
 
     assert result["by_arm"]["morph_mediated"]["impact_f1_rate"] == 1.0
     assert result["by_arm"]["direct_source"]["impact_recall_rate"] == pytest.approx(2 / 3)
@@ -47,7 +52,7 @@ def test_score_runs_compares_a_paired_task_by_arm():
 def test_score_runs_rejects_incomplete_pairs():
     run = _run("morph_mediated", affected=[])
     with pytest.raises(ValueError, match="one run for each arm"):
-        score_runs([run], {"tasks": {"pilot": {"affected_subjects": [], "relationship": "broader"}}})
+        score_runs([run], {"tasks": {"pilot": {"affected_subjects": [], "relationship": "broader"}}}, [_evaluation("morph_mediated")])
 
 
 def test_score_runs_rejects_mismatched_models_in_a_pair():
@@ -55,7 +60,7 @@ def test_score_runs_rejects_mismatched_models_in_a_pair():
     morph = _run("morph_mediated", affected=[])
     morph["agent"]["model"] = "different-agent"
     with pytest.raises(ValueError, match="same provider and model version"):
-        score_runs([direct, morph], {"tasks": {"pilot": {"affected_subjects": [], "relationship": "broader"}}})
+        score_runs([direct, morph], {"tasks": {"pilot": {"affected_subjects": [], "relationship": "broader"}}}, [_evaluation("direct_source"), _evaluation("morph_mediated")])
 
 
 def test_score_runs_flags_unknown_relationship_overclaim():
@@ -63,7 +68,7 @@ def test_score_runs_flags_unknown_relationship_overclaim():
     morph = _run("morph_mediated", affected=[], relationship="unknown")
     reference = {"tasks": {"pilot": {"affected_subjects": [], "relationship": "unknown"}}}
 
-    result = score_runs([direct, morph], reference)
+    result = score_runs([direct, morph], reference, [_evaluation("direct_source"), _evaluation("morph_mediated")])
 
     assert result["by_arm"]["direct_source"]["unknown_overclaims"] == 1
     assert result["by_arm"]["morph_mediated"]["unknown_overclaims"] == 0
@@ -195,3 +200,93 @@ def test_crosspoint_pilot_reference_matches_semantics_and_decisions():
     )
     assert execution.status == "executed"
     assert system.state("destination", "wall")["state"] == "routed"
+
+def test_score_runs_rejects_agent_supplied_judge_fields():
+    run = _run("direct_source", affected=[])
+    run["judge"] = {"implementation_complete": True}
+    with pytest.raises(ValueError, match="evaluator-owned fields"):
+        score_runs([run], {"tasks": {"pilot": {"affected_subjects": [], "relationship": "broader"}}}, [])
+
+
+def test_classify_equivalence_does_not_call_different_policies_identical_without_invariants():
+    entities = [{"name": "source", "fields": {"status": "string"}}]
+    baseline = MORPHIR.from_dict({
+        "name": "x",
+        "entities": entities,
+        "policies": [{"name": "allow_route", "when": "source.status == 'live'"}],
+    })
+    candidate = MORPHIR.from_dict({
+        "name": "x",
+        "entities": entities,
+        "policies": [{"name": "allow_route", "when": "source.status == 'faulted'"}],
+    })
+    assert baseline.structurally_equal(candidate) is False
+    assert baseline.classify_equivalence(candidate) == "CONFLICTING"
+
+
+def test_classify_equivalence_distinguishes_structural_and_semantic_equality():
+    baseline = MORPHIR.from_dict({
+        "name": "x",
+        "policies": [{"name": "allow_route", "when": "source.latency_ms < 120"}],
+    })
+    candidate = MORPHIR.from_dict({
+        "name": "x",
+        "policies": [{"name": "allow_route", "when": "source.latency_ms <= 119"}],
+    })
+    assert baseline.structurally_equal(candidate) is False
+    assert baseline.classify_equivalence(candidate) in {"EQUIVALENT", "UNKNOWN"}
+
+
+def _classification_model(policies, invariants=None):
+    return MORPHIR.from_dict({
+        "name": "x",
+        "entities": [{"name": "source", "fields": {"status": "string", "latency_ms": "int"}}],
+        "invariants": invariants or [],
+        "policies": policies,
+    })
+
+
+def _policy(name, when, action="ok"):
+    return {"name": name, "when": when, "result": {"status": "allow", "action": action}}
+
+
+def test_classify_equivalence_is_unknown_when_a_policy_is_removed():
+    baseline = _classification_model([_policy("a", "source.latency_ms < 120"), _policy("b", "source.status == 'live'")])
+    candidate = _classification_model([_policy("a", "source.latency_ms < 200")])
+    assert baseline.classify_equivalence(candidate) == "UNKNOWN"
+
+
+def test_classify_equivalence_is_unknown_when_policies_are_reordered():
+    first = _policy("a", "source.latency_ms < 120")
+    second = _policy("b", "source.status == 'live'")
+    assert _classification_model([first, second]).classify_equivalence(_classification_model([second, first])) == "UNKNOWN"
+
+
+def test_classify_equivalence_is_unknown_when_a_policy_result_changes():
+    baseline = _classification_model([_policy("a", "source.latency_ms < 120")])
+    candidate = _classification_model([_policy("a", "source.latency_ms <= 119", action="other")])
+    assert baseline.classify_equivalence(candidate) == "UNKNOWN"
+
+
+def test_classify_equivalence_combines_policy_and_invariant_changes():
+    invariant = [{"name": "fast", "when": "source.latency_ms < 120"}]
+    baseline = _classification_model([_policy("a", "source.latency_ms < 120")], invariant)
+    broader_policy = _classification_model([_policy("a", "source.latency_ms < 200")], [{"name": "fast", "when": "source.latency_ms <= 119"}])
+    mixed = _classification_model([_policy("a", "source.latency_ms < 200")], [{"name": "fast", "when": "source.latency_ms < 60"}])
+    assert baseline.classify_equivalence(broader_policy) == "BROADER"
+    assert baseline.classify_equivalence(mixed) == "UNKNOWN"
+
+
+def test_score_runs_rejects_evaluations_without_a_run():
+    runs = [_run("direct_source", affected=[]), _run("morph_mediated", affected=[])]
+    evaluations = [_evaluation("direct_source"), _evaluation("morph_mediated"), _evaluation("morph_mediated", pair_id="other")]
+    with pytest.raises(ValueError, match="do not match any run"):
+        score_runs(runs, {"tasks": {"pilot": {"affected_subjects": [], "relationship": "broader"}}}, evaluations)
+
+
+def test_score_runs_rejects_an_evaluation_for_a_different_task():
+    runs = [_run("direct_source", affected=[]), _run("morph_mediated", affected=[])]
+    evaluations = [_evaluation("direct_source"), {**_evaluation("morph_mediated"), "task_id": "other"}]
+    with pytest.raises(ValueError, match="different task"):
+        score_runs(runs, {"tasks": {"pilot": {"affected_subjects": [], "relationship": "broader"}}}, evaluations)
+
