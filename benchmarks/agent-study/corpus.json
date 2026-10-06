@@ -26,6 +26,21 @@
         "src/morph/examples/crosspoint.yaml",
         "tests/test_system.py"
       ]
+    },
+    {
+      "task_id": "crosspointd-screen-accepts-raw-sources",
+      "category": "behaviour_broadening",
+      "evaluation_status": "frozen",
+      "difficulty": "medium",
+      "baseline_commit": "cb31a1efbc897b6107f2186660b18c1d92960f1b",
+      "prompt": "benchmarks/agent-study/task-crosspointd-screen-accepts.md",
+      "baseline_definition": "src/morph/examples/crosspointd.yaml",
+      "implementation_boundary": [
+        "src/morph/examples/crosspointd.yaml",
+        "tests/test_crosspointd_model.py",
+        "tests/fixtures/crosspointd_manual_decisions.jsonl.gz",
+        "docs/crosspointd-model.md"
+      ]
     }
   ]
 }
