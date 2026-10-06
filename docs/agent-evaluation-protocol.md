@@ -95,9 +95,9 @@ Then generate the two scorer records with the deterministic task-case judge:
 
 ```bash
 python benchmarks/finalize_paired_run.py /private/morph-runs/pair-001/pair.json \
-  --gates /private/morph-runs/pair-001/gates.json \
+  --gates /private/morph-evaluator/pair-001/gates.json \
   --reference /secure/evaluator/reference.json \
-  --output /private/morph-runs/pair-001/runs.jsonl
+  --output /private/morph-results/pair-001.runs.jsonl
 ```
 
 Append each pair's JSONL records to the corpus-wide run file before scoring. The finalizer must be run only after both arms have completed; it verifies the frozen prediction hashes, prompt hash, task status, and pinned baseline before reading the evaluator reference. Its definition-case judge replays the pinned baseline as a sanity check. A failed baseline sanity check is an evaluation setup failure and must be resolved before interpreting candidate results.

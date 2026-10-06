@@ -5,7 +5,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -54,7 +56,6 @@ def finalize_pair(
         raise ValueError("pair prompt hash does not match the current corpus prompt")
     if pair.get("arm_order") not in (list(ARMS), list(reversed(ARMS))):
         raise ValueError("pair arm_order must contain both arms exactly once")
-
     records = []
     for arm in ARMS:
         run = pair["runs"][arm]
@@ -137,13 +138,22 @@ def main() -> int:
             args.pair, args.gates, args.reference,
             allow_development_fixtures=args.allow_development_fixtures,
         )
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        with args.output.open("w", encoding="utf-8") as output:
+        output_path = args.output.resolve()
+        pair_root = args.pair.resolve().parent
+        if output_path == pair_root or pair_root in output_path.parents:
+            raise ValueError("scorer output must be outside the pair directory and agent workspaces")
+        output_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=output_path.parent,
+            prefix=f".{output_path.name}.", delete=False,
+        ) as output:
             for record in records:
                 output.write(json.dumps(record, sort_keys=True) + "\n")
+            temporary_path = Path(output.name)
+        os.replace(temporary_path, output_path)
     except (OSError, ValueError, TypeError, KeyError) as exc:
         parser.error(str(exc))
-    print(json.dumps({"records_written": len(records), "output": str(args.output)}, indent=2))
+    print(json.dumps({"records_written": len(records), "output": str(output_path)}, indent=2))
     return 0
 
 
