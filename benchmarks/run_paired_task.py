@@ -128,7 +128,7 @@ def _validate_start(response: dict[str, Any], label: str) -> tuple[dict[str, str
         raise ValueError(f"{label}: pre_implementation.analysis must include affected_subjects")
     if not all(isinstance(item, str) for item in analysis["affected_subjects"]):
         raise ValueError(f"{label}: affected_subjects must contain strings")
-    if analysis.get("relationship") not in {"equivalent", "narrower", "broader", "conflicting", "unknown"}:
+    if analysis.get("relationship") not in {"equivalent", "narrower", "broader", "overlapping", "conflicting", "unknown"}:
         raise ValueError(f"{label}: analysis.relationship is invalid")
     for key in ("understanding", "semantic_proposal", "morph_analysis"):
         if not isinstance(artifact.get(key), dict):

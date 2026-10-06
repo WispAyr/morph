@@ -50,7 +50,7 @@ from morph.reasoner import SemanticReasoner  # noqa: E402
 from run_paired_task import EXCLUDED_AGENT_FILES  # noqa: E402
 
 EVALUATOR_VERSION = 1
-RELATIONSHIPS = {"equivalent", "narrower", "broader", "conflicting", "unknown"}
+RELATIONSHIPS = {"equivalent", "narrower", "broader", "overlapping", "conflicting", "unknown"}
 WORKSPACE_DIRECTORY = "source"
 IGNORED_WORKSPACE_PARTS = {".git", "__pycache__", ".pytest_cache"}
 DEFAULT_TEST_TIMEOUT_SECONDS = 900
