@@ -736,6 +736,80 @@ class MORPHIR:
         proposal["changes"] = proposal["proposal"]["changes"]
         return proposal
 
+    def decision_changes(self, candidate: "MORPHIR | dict[str, Any]", *, complete_inputs: bool = True) -> dict[str, Any]:
+        """Report, policy by policy, how the inputs each one decides change in a candidate.
+
+        First match means an edit to one policy can change what later policies decide without
+        touching their text, so a textual diff misses them. Each policy on either side is listed
+        with its change (``decides_more_inputs``, ``decides_fewer_inputs``,
+        ``decides_different_inputs``, ``same_inputs_different_outcome``, ``added``,
+        ``added_never_decides`` for a candidate policy that earlier ones shadow completely,
+        ``removed``, or ``unchanged``) and, where inputs moved, an example input with the
+        decision the baseline and the candidate make for it. Examples are re-evaluated by both
+        runtimes and kept only when they confirm the change. Policies gated by a capability grant,
+        or an entity change that is not purely additive, make the result unknown.
+        
+        With ``complete_inputs`` (the default) every input is assumed to carry every field the
+        baseline declares, as a system that always sends full contexts does; fields the candidate
+        adds may still be absent. Without it, any field may be absent, which also counts inputs
+        that only differ because a condition now reads a field that is missing.
+        """
+        if not isinstance(candidate, MORPHIR):
+            candidate = MORPHIR.from_dict(candidate)
+        unknown = {"confidence": "unknown", "decide_differently": [], "policies": []}
+        if self.entities == candidate.entities:
+            types = self._shared_semantic_types(self, candidate)
+        elif self._entities_only_grow(self.entities, candidate.entities):
+            types = self._shared_semantic_types(candidate, candidate)
+        else:
+            return {**unknown, "reason": "entities changed in a way that is not purely additive"}
+        sides = []
+        for model in (self, candidate):
+            terms = []
+            for policy in model.policies:
+                if not isinstance(policy, dict) or not isinstance(policy.get("result"), dict) or policy.get("requires") or not policy.get("name"):
+                    return {**unknown, "reason": "a policy is gated by a capability grant or cannot be modelled"}
+                terms.append((policy["name"], policy.get("when"), json.dumps(policy["result"], sort_keys=True)))
+            sides.append(terms)
+        present = {f"{entity['name']}.{name}" for entity in self.entities if isinstance(entity, dict) and entity.get("name")
+                   for name in (entity.get("fields") or {})} if complete_inputs else set()
+        result = SemanticReasoner().policy_regions(sides[0], sides[1], types=types, present=present)
+        if result["confidence"] != "proven":
+            return {**unknown, "reason": result["reason"]}
+
+        runtimes = []
+        try:
+            from morph.runtime import MORPHRuntime
+
+            for model in (self, candidate):
+                runtimes.append(MORPHRuntime(name=model.name, version=model.version, policies=model.policies,
+                                             capabilities=model.capabilities, entities=model.entities, actions=model.actions))
+        except Exception:
+            runtimes = []
+
+        def decided(index: int, context: dict[str, Any]) -> dict[str, Any] | None:
+            try:
+                decision = runtimes[index].evaluate(context)
+            except Exception:
+                return None
+            return {key: decision.get(key) for key in ("policy", "status", "action", "reason") if decision.get(key) is not None}
+
+        for entry in result["policies"]:
+            for key, side in (("example_now_decided", 1), ("example_no_longer_decided", 0)):
+                example = entry.pop(key, None)
+                if example is None or not runtimes:
+                    continue
+                before, after = decided(0, example), decided(1, example)
+                # Keep an example only when the runtimes confirm it: this policy decides it on the stated side only.
+                if before is None or after is None or (after if side else before).get("policy") != entry["name"] \
+                        or (before if side else after).get("policy") == entry["name"]:
+                    continue
+                entry[key] = {"input": example, "baseline": before, "candidate": after}
+        changed = [entry["name"] for entry in result["policies"] if entry["change"] not in {"unchanged", "removed_never_decided"}]
+        assumption = ("every input carries every field the baseline declares; fields the candidate adds may be absent"
+                      if complete_inputs else "any field may be absent")
+        return {"confidence": "proven", "assumption": assumption, "decide_differently": changed, "policies": result["policies"]}
+
     def diff(self, candidate: "MORPHIR | dict[str, Any]") -> dict[str, Any]:
         """Summarize how a candidate semantic model changes the current one.
 

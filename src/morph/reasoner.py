@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import z3
+from z3 import z3util
 from lark import Token, Tree
 
 from .expressions import when_to_cel
@@ -317,6 +318,117 @@ class SemanticReasoner:
         if allowed["relationship"] == "equivalent":
             return {"relationship": "unknown", "confidence": "unknown", "reason": "the same inputs are allowed, but other outcomes differ"}
         return allowed
+
+    def policy_regions(
+        self,
+        baseline: list[tuple[str, Any, str]],
+        candidate: list[tuple[str, Any, str]],
+        *,
+        types: dict[str, str] | None = None,
+        present: set[str] | frozenset[str] = frozenset(),
+    ) -> dict[str, Any]:
+        """Compare which inputs each policy decides in two first-match policy lists.
+
+        ``present`` names fields every input is assumed to carry, for systems that always send
+        them; any other field may be absent, and a condition reading an absent field does not
+        match.
+
+        Each side is its policies in order, as ``(name, when, outcome)``. A policy decides the
+        inputs it matches that no earlier policy matched, so editing, adding, removing, or
+        reordering one policy can change what later, untouched policies decide. For every policy
+        name on either side the result says whether it now decides more inputs, fewer, a
+        different set, the same inputs with a different outcome, or nothing changed, with an
+        example input for each direction. Unmodelled conditions make the whole result unknown.
+        """
+        try:
+            translator = _PredicateTranslator(types or {})
+
+            def regions(policies: list[tuple[str, Any, str]]) -> dict[str, tuple[z3.BoolRef, str]]:
+                unmatched: z3.BoolRef = z3.BoolVal(True)
+                decided: dict[str, tuple[z3.BoolRef, str]] = {}
+                for name, when, outcome in policies:
+                    match = translator.translate(when_to_cel(when))
+                    decided[name] = (z3.And(unmatched, match), outcome)
+                    unmatched = z3.And(unmatched, z3.Not(match))
+                return decided
+
+            left, right = regions(baseline), regions(candidate)
+            axioms = z3.And(translator.list_axioms(), *[z3.Bool(f"{path}__present") for path in sorted(present)])
+            names = [name for name, _, _ in baseline] + [name for name, _, _ in candidate if name not in left]
+            policies: list[dict[str, Any]] = []
+            for name in names:
+                before, before_outcome = left.get(name, (z3.BoolVal(False), None))
+                after, after_outcome = right.get(name, (z3.BoolVal(False), None))
+                gained = self._witness(z3.And(axioms, after, z3.Not(before)))
+                lost = self._witness(z3.And(axioms, before, z3.Not(after)))
+                if gained == "unknown" or lost == "unknown":
+                    return {"confidence": "unknown", "reason": f"the solver could not decide what {name} decides", "policies": []}
+                entry: dict[str, Any] = {"name": name}
+                if name not in right:
+                    entry["change"] = "removed" if lost is not None else "removed_never_decided"
+                elif name not in left:
+                    entry["change"] = "added" if gained is not None else "added_never_decides"
+                elif gained is not None and lost is not None:
+                    entry["change"] = "decides_different_inputs"
+                elif gained is not None:
+                    entry["change"] = "decides_more_inputs"
+                elif lost is not None:
+                    entry["change"] = "decides_fewer_inputs"
+                elif before_outcome != after_outcome:
+                    entry["change"] = "same_inputs_different_outcome"
+                else:
+                    entry["change"] = "unchanged"
+                if gained is not None:
+                    entry["example_now_decided"] = gained
+                if lost is not None:
+                    entry["example_no_longer_decided"] = lost
+                policies.append(entry)
+        except Exception as exc:
+            return {"confidence": "unknown", "reason": str(exc), "policies": []}
+        return {"confidence": "proven", "reason": "each policy's decided inputs were compared exactly", "policies": policies}
+
+    @staticmethod
+    def _witness(predicate: z3.BoolRef) -> dict[str, Any] | str | None:
+        """An input satisfying the predicate, None when there is none, or "unknown"."""
+        solver = z3.Solver()
+        solver.add(predicate)
+        result = solver.check()
+        if result == z3.unsat:
+            return None
+        if result != z3.sat:
+            return "unknown"
+        model = solver.model()
+        values: dict[str, Any] = {}
+        absent: set[str] = set()
+        # Every variable in the predicate gets a value, so the example is a complete input.
+        for variable in z3util.get_vars(predicate):
+            name = variable.decl().name()
+            value = model.eval(variable, model_completion=True)
+            if name.endswith("__present"):
+                if z3.is_false(value):
+                    absent.add(name[: -len("__present")])
+                continue
+            if "__" in name:
+                continue
+            if z3.is_true(value) or z3.is_false(value):
+                values[name] = z3.is_true(value)
+            elif z3.is_int_value(value):
+                values[name] = value.as_long()
+            elif z3.is_rational_value(value):
+                values[name] = float(value.as_fraction())
+            elif z3.is_string_value(value):
+                values[name] = value.as_string()
+        context: dict[str, Any] = {}
+        for path, value in sorted(values.items()):
+            if path in absent:
+                continue
+            node = context
+            *parents, leaf = path.split(".")
+            for part in parents:
+                node = node.setdefault(part, {})
+            if isinstance(node, dict):
+                node[leaf] = value
+        return context
 
     @staticmethod
     def _decision_function(translator: _PredicateTranslator, policies: list[tuple[Any, str, bool]]) -> tuple[dict[str, z3.BoolRef], z3.BoolRef]:
