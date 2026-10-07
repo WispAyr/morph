@@ -70,10 +70,12 @@ def _build_parser() -> argparse.ArgumentParser:
     simulate_parser.add_argument("--context", help="Path to a JSON/YAML file containing a single context object or a list of context objects.")
     simulate_parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output.")
 
-    diff_parser = subparsers.add_parser("diff", help="Compare two MORPH definitions and report semantic-preservation differences.")
+    diff_parser = subparsers.add_parser("diff", help="Compare two MORPH definitions: invariants preserved, added, or blocked; how what the system allows changes; and which policies now decide different inputs.")
     diff_parser.add_argument("baseline", help="Path to the original MORPH YAML file.")
     diff_parser.add_argument("candidate", help="Path to the proposed updated MORPH YAML file.")
     diff_parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON output.")
+    diff_parser.add_argument("--allow-missing-fields", action="store_true",
+                             help="Also consider inputs missing fields the baseline declares (by default every input carries them).")
 
     propose_parser = subparsers.add_parser("propose", help="Generate an AI-facing semantic proposal for a candidate mutation.")
     propose_parser.add_argument("baseline", help="Path to the original MORPH YAML file.")
@@ -336,11 +338,13 @@ def _cmd_simulate(source: str, context_path: str | None, pretty: bool) -> int:
         return 1
 
 
-def _cmd_diff(baseline: str, candidate: str, pretty: bool) -> int:
+def _cmd_diff(baseline: str, candidate: str, pretty: bool, allow_missing_fields: bool = False) -> int:
     try:
         base_ir = load_system_definition(Path(baseline))
         cand_ir = load_system_definition(Path(candidate))
         diff = base_ir.diff(cand_ir)
+        diff["relationship"] = base_ir.classify_equivalence(cand_ir)
+        diff["decisions"] = base_ir.decision_changes(cand_ir, complete_inputs=not allow_missing_fields)
         if diff["blocked"]:
             print(json.dumps(diff, indent=2 if pretty else None))
             return 1
@@ -489,7 +493,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_simulate(args.source, args.context, args.pretty)
 
     if args.command == "diff":
-        return _cmd_diff(args.baseline, args.candidate, args.pretty)
+        return _cmd_diff(args.baseline, args.candidate, args.pretty, args.allow_missing_fields)
 
     if args.command == "propose":
         return _cmd_propose(args.baseline, args.candidate, args.intent, args.pretty)

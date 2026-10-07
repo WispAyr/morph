@@ -125,6 +125,8 @@ def _analysis_prompt(request: dict[str, Any]) -> str:
             f"{definition}, the system's MORPH definition. Use the MORPH CLI on it, for example "
             f"`morph inspect {definition}`, `morph impact {definition} SUBJECT`, "
             f"`morph simulate {definition} --context scenarios.yaml`, and `morph diff {definition} candidate.yaml`. "
+            "`morph diff` reports the invariants a candidate keeps, adds, or breaks, how the set of allowed requests "
+            "changes (relationship), and under decisions which policies decide different inputs, with an example of each. "
             "You may write scratch files such as scenarios.yaml or candidate.yaml in this directory; they are "
             "discarded. Do not change the source tree, which you will get in the next phase."
         )
