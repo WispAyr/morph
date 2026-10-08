@@ -78,7 +78,7 @@ The rules that make manual control safe are about decisions, so the model states
 | `force_sent_only_when_on_air` | Force is sent only when it overrides an on-air lock |
 | `operator_only_gets_proposals` | An operator-only destination is never commanded, only proposed to |
 | `peer_destinations_are_forwarded` | A peer's destination is always forwarded to the peer |
-| `screens_take_only_layouts` | A screen is only given a composition |
+| `screens_take_only_layouts` | A screen is only given a composition, or a source of a kind its owner explicitly lists in `accepts` (crosspoint #59, the CSU van displays) |
 | `no_command_while_one_is_in_flight` | No command is sent while one is awaiting an ack |
 
 All 2,560 recorded scenarios satisfy them. They also protect the model without the oracle: removing the policy that enforces any one of them makes `morph simulate` report that invariant as broken, and `morph diff` blocks a candidate that rewrites one in a way it cannot prove equivalent. The evaluator uses both, so an agent's change to this model is checked against these rules directly.
