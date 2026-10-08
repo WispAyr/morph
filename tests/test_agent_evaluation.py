@@ -415,16 +415,21 @@ def test_reasoner_models_list_fields_exactly():
 
 
 def test_the_screen_accepts_change_classifies_as_broader():
+    # The example now carries the change (crosspoint #59, 8 Oct 2026): rebuild the model from BEFORE it and check that
+    # going to the current model is classified as broader.
     path = Path(__file__).parents[1] / "src/morph/examples/crosspointd.yaml"
-    baseline = MORPHIR.from_dict(load_system_definition(path).to_dict())
-    data = copy.deepcopy(baseline.to_dict())
-    screen = next(policy for policy in data["policies"] if policy["name"] == "deny_screen_needs_layout")
-    screen["when"] += " && !(source.kind in destination.accepts)"
-    invariant = next(item for item in data["invariants"] if item["name"] == "screens_take_only_layouts")
-    invariant["when"] += " || source.kind in destination.accepts"
+    current = load_system_definition(path).to_dict()
+    policy_clause, invariant_clause = " && !(source.kind in destination.accepts)", " || source.kind in destination.accepts"
+    before_data = copy.deepcopy(current)
+    screen = next(policy for policy in before_data["policies"] if policy["name"] == "deny_screen_needs_layout")
+    invariant = next(item for item in before_data["invariants"] if item["name"] == "screens_take_only_layouts")
+    assert policy_clause in screen["when"] and invariant_clause in invariant["when"], "the example no longer carries the change"
+    screen["when"] = screen["when"].replace(policy_clause, "")
+    invariant["when"] = invariant["when"].replace(invariant_clause, "")
+    before = MORPHIR.from_dict(before_data)
 
-    assert baseline.classify_equivalence(data) == "BROADER"
+    assert before.classify_equivalence(copy.deepcopy(current)) == "BROADER"
     # Changing only the policy is broader too; the evaluator's simulation is what catches the stale invariant.
-    policy_only = copy.deepcopy(baseline.to_dict())
-    next(policy for policy in policy_only["policies"] if policy["name"] == "deny_screen_needs_layout")["when"] = screen["when"]
-    assert baseline.classify_equivalence(policy_only) == "BROADER"
+    policy_only = copy.deepcopy(before_data)
+    next(policy for policy in policy_only["policies"] if policy["name"] == "deny_screen_needs_layout")["when"] += policy_clause
+    assert before.classify_equivalence(policy_only) == "BROADER"
