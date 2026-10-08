@@ -91,7 +91,7 @@ invariants:
   - name: screens_take_only_layouts
     when: >-
       !(decision.action in ["take", "forced_take", "propose_take"])
-      || destination.kind != "screen" || source.kind == "composition"
+      || destination.kind != "screen" || source.kind == "composition" || source.kind in destination.accepts
   - name: no_command_while_one_is_in_flight
     when: '!destination.command_in_flight || destination.peer || decision.status == "deny"'
 
@@ -107,7 +107,7 @@ policies:
     result: {status: allow, action: forward_release}
 
   - name: deny_screen_needs_layout
-    when: request.action == "take" && destination.kind == "screen" && source.kind != "composition"
+    when: request.action == "take" && destination.kind == "screen" && source.kind != "composition" && !(source.kind in destination.accepts)
     result: {status: deny, action: reject_request, reason: screen_needs_layout}
   - name: deny_not_accepted
     when: request.action == "take" && size(destination.accepts) > 0 && !(source.kind in destination.accepts)
